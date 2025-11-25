@@ -1252,7 +1252,7 @@ class BaseBot:
                 return False
 
             cancel_all_orders(symbol, self.api_key, self.api_secret)
-            time.sleep(0.2)
+            time.sleep(1)
 
             result = place_order(symbol, side, qty, self.api_key, self.api_secret)
             if result and 'orderId' in result:
