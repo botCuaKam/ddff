@@ -980,69 +980,100 @@ class BaseBot:
             return False
 
     def _check_pyramiding(self, symbol):
-        """Kiểm tra và thực hiện nhồi lệnh KHI ÂM (lỗ)"""
+        """
+        Nhồi KHI ĐANG LỖ (ROI âm), dùng ROI có đòn bẩy giống TP/SL,
+        và dùng mốc ROI cộng dồn:
+
+        - Lần 1: base_roi = 0  → nhồi khi ROI <= -pyramiding_x
+        - Nhồi xong: base_roi = ROI hiện tại (âm)
+        - Lần 2: nhồi khi ROI <= base_roi - pyramiding_x
+        - Lần 3: tương tự...
+
+        Dừng khi đã nhồi đủ self.pyramiding_n lần.
+        """
         try:
             if not self.pyramiding_enabled:
                 return False
-                
-            symbol_info = self.symbol_data.get(symbol)
-            if not symbol_info:
+
+            info = self.symbol_data.get(symbol)
+            if not info or not info.get('position_open', False):
                 return False
-            
-            # Kiểm tra đã nhồi đủ số lần chưa
-            if symbol_info.get('pyramiding_count', 0) >= self.pyramiding_n:
+
+            # Đã nhồi đủ số lần
+            current_count = int(info.get('pyramiding_count', 0))
+            if current_count >= self.pyramiding_n:
                 return False
-            
-            # Kiểm tra thời gian nhồi lệnh (tránh nhồi quá nhanh)
+
+            # Cooldown giữa các lần nhồi (60s)
             current_time = time.time()
-            if current_time - symbol_info.get('last_pyramiding_time', 0) < 60:  # 60s giữa các lần nhồi
+            if current_time - info.get('last_pyramiding_time', 0) < 60:
                 return False
-            
-            # Tính ROI hiện tại
+
+            # ===== TÍNH ROI THEO ĐÒN BẨY (GIỐNG TP/SL) =====
             current_price = self.get_current_price(symbol)
-            if current_price <= 0:
+            if current_price is None or current_price <= 0:
                 return False
-            
-            entry_price = symbol_info.get('entry', 0)
-            if entry_price <= 0:
+
+            entry = float(info.get('entry', 0))
+            qty   = abs(float(info.get('qty', 0)))
+            if entry <= 0 or qty <= 0:
                 return False
-            
-            # Tính ROI
-            if symbol_info['side'] == "BUY":
-                roi = ((current_price - entry_price) / entry_price) * 100
+
+            # Profit theo hướng BUY/SELL
+            if info.get('side') == "BUY":
+                profit = (current_price - entry) * qty
             else:  # SELL
-                roi = ((entry_price - current_price) / entry_price) * 100
-            
-            # CHỈ NHỒI KHI ROI ÂM (đang lỗ)
+                profit = (entry - current_price) * qty
+
+            invested = entry * qty / self.lev
+            if invested <= 0:
+                return False
+
+            roi = (profit / invested) * 100  # ROI có leverage
+
+            # CHỈ NHỒI KHI ĐANG LỖ (ROI âm)
             if roi >= 0:
                 return False
-            
-            # Lấy mốc ROI tiếp theo cần đạt để nhồi lệnh (âm)
-            next_pyramiding_roi = symbol_info.get('next_pyramiding_roi', self.pyramiding_x)
-            
-            # Chuyển sang số âm để so sánh
-            target_roi = -next_pyramiding_roi
-            
-            # Kiểm tra nếu ROI âm đạt mức target (ví dụ: roi = -150%, target = -100%)
-            if roi <= target_roi:  # roi càng âm thì càng nhỏ, -150 < -100
-                self.log(f"📉 {symbol} - Đạt mốc lỗ {roi:.2f}% <= {target_roi}%, thực hiện nhồi lệnh...")
-                
-                # Thực hiện nhồi lệnh
-                if self._pyramid_order(symbol):
-                    # Cập nhật số lần đã nhồi
-                    symbol_info['pyramiding_count'] = symbol_info.get('pyramiding_count', 0) + 1
-                    # Cập nhật mốc ROI tiếp theo (tăng thêm pyramiding_x)
-                    symbol_info['next_pyramiding_roi'] = next_pyramiding_roi + self.pyramiding_x
-                    symbol_info['last_pyramiding_time'] = current_time
-                    
-                    self.log(f"🔁 {symbol} - Đã nhồi lệnh lần {symbol_info['pyramiding_count']}/{self.pyramiding_n}. Mốc lỗ tiếp theo: -{symbol_info['next_pyramiding_roi']}%")
-                    return True
-            
+
+            step = float(self.pyramiding_x or 0)
+            if step <= 0:
+                return False
+
+            # ===== CƠ CHẾ MỐC: base_roi - step =====
+            # Lần đầu: base_roi = 0 → trigger = -step
+            # Sau mỗi lần nhồi: base_roi = roi tại thời điểm nhồi
+            base_roi = float(info.get('pyramiding_base_roi', 0.0))
+            target_roi = base_roi - step  # vì roi, base_roi đều âm hoặc 0
+
+            # Ví dụ: base=-40, step=50 → target=-90, nhồi khi roi <= -90
+            if roi > target_roi:
+                # Chưa lỗ đủ sâu so với mốc hiện tại
+                return False
+
+            # ===== ĐỦ ĐIỀU KIỆN → THỰC HIỆN NHỒI =====
+            self.log(
+                f"📉 {symbol} - ROI hiện tại {roi:.2f}% <= mốc nhồi {target_roi:.2f}% "
+                f"(mốc cũ: {base_roi:.2f}%, step: {step}%) → THỬ NHỒI..."
+            )
+
+            if self._pyramid_order(symbol):
+                new_count = current_count + 1
+                info['pyramiding_count'] = new_count
+                info['pyramiding_base_roi'] = roi          # mốc mới = ROI hiện tại
+                info['last_pyramiding_time'] = current_time
+
+                self.log(
+                    f"🔄 {symbol} - ĐÃ NHỒI LẦN {new_count}/{self.pyramiding_n} "
+                    f"tại ROI {roi:.2f}%. Mốc ROI mới: {roi:.2f}%"
+                )
+                return True
+
             return False
-            
+
         except Exception as e:
             self.log(f"❌ Lỗi kiểm tra nhồi lệnh {symbol}: {str(e)}")
             return False
+
     def _pyramid_order(self, symbol):
         """Thực hiện lệnh nhồi (thêm lệnh cùng chiều)"""
         try:
@@ -1211,8 +1242,10 @@ class BaseBot:
             'high_water_mark_roi': 0, 'roi_check_activated': False,
             'close_attempted': False, 'last_close_attempt': 0, 'last_position_check': 0,
             # Thêm thông tin nhồi lệnh
-            'pyramiding_count': 0, 'next_pyramiding_roi': self.pyramiding_x if self.pyramiding_enabled else 0,
-            'last_pyramiding_time': 0
+            'pyramiding_count': 0,
+            'next_pyramiding_roi': self.pyramiding_x if self.pyramiding_enabled else 0,  # (không dùng nữa cũng được, giữ cho khỏi lỗi)
+            'last_pyramiding_time': 0,
+            'pyramiding_base_roi': 0.0,   # ⭐ MỐC ROI BAN ĐẦU
         }
         
         self.active_symbols.append(symbol)
@@ -1290,8 +1323,10 @@ class BaseBot:
                 'close_attempted': False, 'last_close_attempt': 0, 'entry_base': 0,
                 'average_down_count': 0, 'high_water_mark_roi': 0, 'roi_check_activated': False,
                 # Reset thông tin nhồi lệnh
-                'pyramiding_count': 0, 'next_pyramiding_roi': self.pyramiding_x if self.pyramiding_enabled else 0,
-                'last_pyramiding_time': 0
+                'pyramiding_count': 0,
+                'next_pyramiding_roi': self.pyramiding_x if self.pyramiding_enabled else 0,
+                'last_pyramiding_time': 0,
+                'pyramiding_base_roi': 0.0,   
             })
 
     def _open_symbol_position(self, symbol, side):
@@ -1377,8 +1412,9 @@ class BaseBot:
                     if self.pyramiding_enabled:
                         pyramiding_info = {
                             'pyramiding_count': 0,
-                            'next_pyramiding_roi': self.pyramiding_x,
-                            'last_pyramiding_time': 0
+                            'next_pyramiding_roi': self.pyramiding_x,  # giữ cho tương thích nếu chỗ khác còn xài
+                            'last_pyramiding_time': 0,
+                            'pyramiding_base_roi': 0.0,
                         }
                     
                     self.symbol_data[symbol].update({
