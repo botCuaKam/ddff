@@ -408,6 +408,47 @@ def get_total_and_available_balance(api_key, api_secret):
         return None, None
 
 
+def get_margin_safety_info(api_key, api_secret):
+    """
+    Lấy thông tin an toàn ký quỹ:
+      - margin_balance = totalMarginBalance (tổng số dư ký quỹ, gồm PnL)
+      - maint_margin   = totalMaintMargin (tổng mức duy trì ký quỹ)
+      - ratio          = margin_balance / maint_margin  (nếu maint_margin > 0)
+    """
+    try:
+        ts = int(time.time() * 1000)
+        params = {"timestamp": ts}
+        query = urllib.parse.urlencode(params)
+        sig = sign(query, api_secret)
+        url = f"https://fapi.binance.com/fapi/v2/account?{query}&signature={sig}"
+        headers = {"X-MBX-APIKEY": api_key}
+
+        data = binance_api_request(url, headers=headers)
+        if not data:
+            logger.error("❌ Không lấy được thông tin ký quỹ từ Binance")
+            return None, None, None
+
+        margin_balance = float(data.get("totalMarginBalance", 0.0))
+        maint_margin = float(data.get("totalMaintMargin", 0.0))
+
+        if maint_margin <= 0:
+            logger.warning(
+                f"⚠️ Maint margin <= 0 (margin_balance={margin_balance:.4f}, maint_margin={maint_margin:.4f})"
+            )
+            return margin_balance, maint_margin, None
+
+        ratio = margin_balance / maint_margin
+
+        logger.info(
+            f"🛡️ Margin safety: margin_balance={margin_balance:.4f}, "
+            f"maint_margin={maint_margin:.4f}, ratio={ratio:.2f}x"
+        )
+        return margin_balance, maint_margin, ratio
+
+    except Exception as e:
+        logger.error(f"Lỗi lấy thông tin an toàn ký quỹ: {str(e)}")
+        return None, None, None
+
 def place_order(symbol, side, qty, api_key, api_secret):
     if not symbol: return None
     try:
@@ -847,6 +888,11 @@ class BaseBot:
         self.global_short_pnl = 0
         self.next_global_side = None
 
+        self.margin_safety_threshold = 1.15      # 115% mức duy trì ký quỹ
+        self.margin_safety_interval = 10         # mỗi 10 giây kiểm tra một lần
+        self.last_margin_safety_check = 0
+
+
         self.coin_manager = coin_manager or CoinManager()
         self.symbol_locks = symbol_locks
         self.coin_finder = SmartCoinFinder(api_key, api_secret)
@@ -877,6 +923,13 @@ class BaseBot:
         while not self._stop:
             try:
                 current_time = time.time()
+
+                if current_time - self.last_margin_safety_check > self.margin_safety_interval:
+                    self.last_margin_safety_check = current_time
+                    if self._check_margin_safety():
+                        # Sau khi đóng hết coin của bot thì nghỉ 5s rồi loop tiếp
+                        time.sleep(5)
+                        continue
                 
                 # KIỂM TRA VỊ THẾ TOÀN TÀI KHOẢN ĐỊNH KỲ
                 if current_time - self.last_global_position_check > 30:
@@ -1511,6 +1564,50 @@ class BaseBot:
         except Exception as e:
             self.log(f"❌ {symbol} - Close position error: {str(e)}")
             self.symbol_data[symbol]['close_attempted'] = False
+            return False
+
+    def _check_margin_safety(self):
+        """
+        Kiểm tra an toàn ký quỹ toàn tài khoản futures.
+        Nếu margin_balance <= 115% maint_margin => đóng hết coin thuộc bot này.
+        Trả về:
+            True  nếu đã kích hoạt bảo vệ và đóng vị thế của bot
+            False nếu không có vấn đề / lỗi / chưa tới ngưỡng
+        """
+        try:
+            margin_balance, maint_margin, ratio = get_margin_safety_info(
+                self.api_key, self.api_secret
+            )
+
+            # Không đủ dữ liệu để quyết định
+            if margin_balance is None or maint_margin is None or ratio is None:
+                return False
+
+            # Nếu margin_balance <= 115% maint_margin → rất gần vùng thanh lý
+            if ratio <= self.margin_safety_threshold:
+                msg = (
+                    f"🛑 MARGIN SAFETY TRIGGERED\n"
+                    f"• Margin / Maint = {ratio:.2f}x ≤ {self.margin_safety_threshold:.2f}x\n"
+                    f"• Đang đóng toàn bộ vị thế của bot để tránh thanh lý."
+                )
+                self.log(msg)
+
+                # Gửi telegram nếu có cấu hình
+                send_telegram(
+                    msg,
+                    chat_id=self.telegram_chat_id,
+                    bot_token=self.telegram_bot_token,
+                    default_chat_id=self.telegram_chat_id,
+                )
+
+                # Đóng toàn bộ coin mà bot này đang quản lý
+                self.stop_all_symbols()
+                return True
+
+            return False
+
+        except Exception as e:
+            self.log(f"❌ Lỗi kiểm tra an toàn ký quỹ: {str(e)}")
             return False
 
     def _check_symbol_tp_sl(self, symbol):
