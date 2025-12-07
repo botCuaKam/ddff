@@ -886,6 +886,8 @@ class BaseBot:
         self.global_short_count = 0
         self.global_long_pnl = 0
         self.global_short_pnl = 0
+        self.global_long_volume = 0.0  # Tổng khối lượng (sau khi nhân đòn bẩy) phía LONG
+        self.global_short_volume = 0.0
         self.next_global_side = None
 
         self.margin_safety_threshold = 1.15      # 115% mức duy trì ký quỹ
@@ -1685,13 +1687,14 @@ class BaseBot:
 
     def check_global_positions(self):
         """
-        Cập nhật số lượng lệnh LONG/SHORT toàn tài khoản
-        và quyết định luôn hướng ưu tiên (next_global_side) dựa trên COUNT.
+        Cập nhật tổng khối lượng LONG/SHORT toàn tài khoản
+        (đã nhân với đòn bẩy) và quyết định hướng ưu tiên (next_global_side)
+        dựa trên KHỐI LƯỢNG THỰC TẾ thay vì chỉ đếm số lệnh.
 
         CƠ CHẾ:
-        - Nếu số lệnh LONG > số lệnh SHORT  → ưu tiên SELL (cân bằng hai phía)
-        - Nếu số lệnh SHORT > số lệnh LONG → ưu tiên BUY
-        - Nếu bằng nhau                    → random BUY/SELL
+        - Nếu tổng volume LONG  > tổng volume SHORT  → ưu tiên SELL (giảm thiên LONG)
+        - Nếu tổng volume SHORT > tổng volume LONG   → ưu tiên BUY  (giảm thiên SHORT)
+        - Nếu hai bên xấp xỉ nhau                    → random BUY/SELL
         """
         try:
             positions = get_positions(api_key=self.api_key, api_secret=self.api_secret)
@@ -1700,41 +1703,95 @@ class BaseBot:
             if not positions:
                 self.global_long_count = 0
                 self.global_short_count = 0
-
-                # Không xài PnL nữa, set về 0 cho sạch
                 self.global_long_pnl = 0
                 self.global_short_pnl = 0
+                self.global_long_volume = 0.0
+                self.global_short_volume = 0.0
 
                 # Không có gì → chọn ngẫu nhiên
                 self.next_global_side = random.choice(["BUY", "SELL"])
                 return
-            
+
             long_count, short_count = 0, 0
+            long_volume, short_volume = 0.0, 0.0
 
-            # ĐẾM SỐ LỆNH LONG/SHORT, KHÔNG ĐỤNG TỚI PnL
+            # TÍNH TỔNG KHỐI LƯỢNG (QTY * PRICE * LEVERAGE) CHO LONG VÀ SHORT
             for pos in positions:
-                position_amt = float(pos.get('positionAmt', 0))
+                position_amt = float(pos.get("positionAmt", 0.0))
+                if position_amt == 0:
+                    continue
 
+                # Đếm số lệnh cho mục đích debug/log
                 if position_amt > 0:
                     long_count += 1
                 elif position_amt < 0:
                     short_count += 1
-            
+
+                # Lấy leverage, markPrice/entryPrice để ước lượng notional
+                try:
+                    lev = float(pos.get("leverage", 1.0))
+                except Exception:
+                    lev = 1.0
+
+                price = 0.0
+                try:
+                    price = float(pos.get("markPrice") or 0.0)
+                except Exception:
+                    price = 0.0
+
+                if price <= 0:
+                    try:
+                        price = float(pos.get("entryPrice") or 0.0)
+                    except Exception:
+                        price = 0.0
+
+                # Nếu vẫn không có giá thì bỏ qua position này
+                if price <= 0:
+                    continue
+
+                notional = abs(position_amt) * price
+                effective_volume = notional * lev  # khối lượng sau khi nhân đòn bẩy
+
+                if position_amt > 0:
+                    long_volume += effective_volume
+                elif position_amt < 0:
+                    short_volume += effective_volume
+
             self.global_long_count = long_count
             self.global_short_count = short_count
-
-            # PnL không dùng nữa
             self.global_long_pnl = 0
             self.global_short_pnl = 0
+            self.global_long_volume = long_volume
+            self.global_short_volume = short_volume
 
             # --- LOGIC CHỌN HƯỚNG NẰM Ở ĐÂY ---
-            # ✅ CÂN BẰNG: đông LONG → ưu tiên SELL, đông SHORT → ưu tiên BUY
-            if long_count > short_count:
-                self.next_global_side = "SELL"
-            elif short_count > long_count:
-                self.next_global_side = "BUY"
+            # ✅ CÂN BẰNG THEO VOLUME: nhiều volume LONG → ưu tiên SELL, nhiều volume SHORT → ưu tiên BUY
+            # Để tránh nhiễu do chênh lệch nhỏ, có thể đặt một ngưỡng tối thiểu (ví dụ 1%)
+            if long_volume > 0 or short_volume > 0:
+                # Nếu chênh lệch rất nhỏ (<1%), coi như cân bằng
+                diff = abs(long_volume - short_volume)
+                total = long_volume + short_volume
+                if total > 0:
+                    imbalance = diff / total
+                else:
+                    imbalance = 0
+
+                if imbalance < 0.01:
+                    # Coi như cân bằng
+                    self.next_global_side = random.choice(["BUY", "SELL"])
+                else:
+                    if long_volume > short_volume:
+                        self.next_global_side = "SELL"
+                    else:
+                        self.next_global_side = "BUY"
             else:
-                self.next_global_side = random.choice(["BUY", "SELL"])
+                # Nếu không lấy được volume thì fallback về đếm số lệnh
+                if long_count > short_count:
+                    self.next_global_side = "SELL"
+                elif short_count > long_count:
+                    self.next_global_side = "BUY"
+                else:
+                    self.next_global_side = random.choice(["BUY", "SELL"])
 
         except Exception as e:
             if time.time() - self.last_error_log_time > 30:
