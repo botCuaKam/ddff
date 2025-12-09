@@ -694,9 +694,9 @@ class SmartCoinFinder:
                 result = "BUY"
             elif rsi_current < 20 and price_decreasing and volume_increasing:
                 result = "BUY"
-            elif rsi_current > 20 and price_not_decreasing and volume_decreasing:
+            elif 45 > rsi_current > 20 and price_not_decreasing and volume_decreasing:
                 result = "BUY"
-            elif rsi_current < 80 and price_not_increasing and volume_increasing:
+            elif 55 < rsi_current < 80 and price_not_increasing and volume_increasing:
                 result = "SELL"
             else:
                 result = None
@@ -754,6 +754,51 @@ class SmartCoinFinder:
             selected_symbol, _ = random.choice(valid_symbols)
 
             if self.has_existing_position(selected_symbol): return None
+            logger.info(f"🎯 Đã chọn coin: {selected_symbol}")
+            return selected_symbol
+
+        except Exception as e:
+            logger.error(f"❌ Lỗi tìm coin: {str(e)}")
+            return None
+
+    def find_coin_with_any_signal(self, excluded_coins=None, required_leverage=10):
+        """Tìm coin BẤT KỲ có tín hiệu (BUY/SELL) - KHÔNG quan tâm đến hướng ưu tiên"""
+        try:
+            now = time.time()
+            if now - self.last_scan_time < self.scan_cooldown: 
+                return None
+            self.last_scan_time = now
+
+            all_symbols = get_all_usdc_pairs(limit=50)
+            if not all_symbols: 
+                return None
+
+            valid_symbols = []
+            for symbol in all_symbols:
+                if excluded_coins and symbol in excluded_coins: 
+                    continue
+                if self.has_existing_position(symbol): 
+                    continue
+
+                max_lev = self.get_symbol_leverage(symbol)
+                if max_lev < required_leverage: 
+                    continue
+
+                time.sleep(0.05)
+                entry_signal = self.get_entry_signal(symbol)
+                if entry_signal in ["BUY", "SELL"]:
+                    valid_symbols.append(symbol)
+                    logger.info(f"✅ Đã tìm thấy coin có tín hiệu: {symbol} - {entry_signal}")
+                    break  # CHỈ LẤY COIN ĐẦU TIÊN CÓ TÍN HIỆU
+
+            if not valid_symbols: 
+                return None
+            
+            selected_symbol = valid_symbols[0]
+            
+            if self.has_existing_position(selected_symbol): 
+                return None
+            
             logger.info(f"🎯 Đã chọn coin: {selected_symbol}")
             return selected_symbol
 
@@ -845,7 +890,7 @@ class BaseBot:
     def __init__(self, symbol, lev, percent, tp, sl, roi_trigger, ws_manager, api_key, api_secret,
                  telegram_bot_token, telegram_chat_id, strategy_name, config_key=None, bot_id=None,
                  coin_manager=None, symbol_locks=None, max_coins=1, bot_coordinator=None,
-                 pyramiding_n=0, pyramiding_x=0):
+                 pyramiding_n=0, pyramiding_x=0, bot_mode='dynamic'):
 
         self.max_coins = 1
         self.active_symbols = []
@@ -865,6 +910,7 @@ class BaseBot:
         self.strategy_name = strategy_name
         self.config_key = config_key
         self.bot_id = bot_id or f"{strategy_name}_{int(time.time())}_{random.randint(1000, 9999)}"
+        self.bot_mode = bot_mode  # 'static' hoặc 'dynamic'
 
         # Thêm cấu hình nhồi lệnh
         self.pyramiding_n = int(pyramiding_n) if pyramiding_n else 0  # Số lần nhồi lệnh (0 = tắt)
@@ -894,7 +940,6 @@ class BaseBot:
         self.margin_safety_interval = 10         # mỗi 10 giây kiểm tra một lần
         self.last_margin_safety_check = 0
 
-
         self.coin_manager = coin_manager or CoinManager()
         self.symbol_locks = symbol_locks
         self.coin_finder = SmartCoinFinder(api_key, api_secret)
@@ -918,7 +963,7 @@ class BaseBot:
         roi_info = f" | 🎯 ROI Kích hoạt: {roi_trigger}%" if roi_trigger else " | 🎯 ROI Kích hoạt: Tắt"
         pyramiding_info = f" | 🔄 Nhồi lệnh: {pyramiding_n} lần tại {pyramiding_x}%" if self.pyramiding_enabled else " | 🔄 Nhồi lệnh: Tắt"
         
-        self.log(f"🟢 Bot {strategy_name} đã khởi động | 1 coin | Đòn bẩy: {lev}x | Vốn: {percent}% | TP/SL: {tp}%/{sl}%{roi_info}{pyramiding_info}")
+        self.log(f"🟢 Bot {strategy_name} đã khởi động | Mode: {bot_mode} | Đòn bẩy: {lev}x | Vốn: {percent}% | TP/SL: {tp}%/{sl}%{roi_info}{pyramiding_info}")
 
     def _run(self):
         """Vòng lặp chính - CHỈ CHUYỂN QUYỀN KHI ĐÃ VÀO LỆNH THÀNH CÔNG"""
@@ -929,7 +974,6 @@ class BaseBot:
                 if current_time - self.last_margin_safety_check > self.margin_safety_interval:
                     self.last_margin_safety_check = current_time
                     if self._check_margin_safety():
-                        # Sau khi đóng hết coin của bot thì nghỉ 5s rồi loop tiếp
                         time.sleep(5)
                         continue
                 
@@ -943,18 +987,16 @@ class BaseBot:
                     search_permission = self.bot_coordinator.request_coin_search(self.bot_id)
                     
                     if search_permission:
-                        # Bot này được quyền tìm coin
                         queue_info = self.bot_coordinator.get_queue_info()
                         self.log(f"🔍 Đang tìm coin (vị trí: 1/{queue_info['queue_size'] + 1})...")
                         
-                        # TÌM COIN
-                        found_coin = self._find_and_add_new_coin()
+                        # TÌM COIN - CHỈ QUAN TÂM ĐẾN TÍN HIỆU, KHÔNG QUAN TÂM HƯỚNG ƯU TIÊN
+                        found_coin = self._find_and_add_new_coin_ignore_side()
                         
                         if found_coin:
-                            # 🎯 QUAN TRỌNG: CHỈ ĐÁNH DẤU LÀ ĐANG XỬ LÝ, CHƯA CHUYỂN QUYỀN
-                            self.bot_coordinator.bot_has_coin(self.bot_id)  # Đánh dấu bot đang xử lý coin
+                            # Đánh dấu bot đang xử lý coin
+                            self.bot_coordinator.bot_has_coin(self.bot_id)
                             self.log(f"✅ Đã tìm thấy coin: {found_coin}, đang chờ vào lệnh...")
-                            # 🚫 KHÔNG gọi finish_coin_search ở đây - chờ vào lệnh thành công
                         else:
                             # Tìm thất bại - giải phóng quyền tìm ngay
                             self.bot_coordinator.finish_coin_search(self.bot_id)
@@ -968,17 +1010,16 @@ class BaseBot:
                             self.log(f"⏳ Đang chờ tìm coin (vị trí: {queue_pos}/{queue_info['queue_size'] + 1}) - Bot đang tìm: {current_finder}")
                         time.sleep(2)
                 
-                # XỬ LÝ COIN HIỆN TẠI (nếu có) - QUAN TRỌNG: KIỂM TRA VÀO LỆNH THÀNH CÔNG
+                # XỬ LÝ COIN HIỆN TẠI (nếu có)
                 for symbol in self.active_symbols.copy():
-                    position_opened = self._process_single_symbol(symbol)
+                    position_opened = self._process_single_symbol_with_side_check(symbol)
                     
-                    # 🎯 NẾU VỪA VÀO LỆNH THÀNH CÔNG, CHUYỂN QUYỀN CHO BOT TIẾP THEO
                     if position_opened:
                         self.log(f"🎯 Đã vào lệnh thành công {symbol}, chuyển quyền tìm coin...")
                         next_bot = self.bot_coordinator.finish_coin_search(self.bot_id)
                         if next_bot:
                             self.log(f"🔄 Đã chuyển quyền tìm coin cho bot: {next_bot}")
-                        break  # Chỉ xử lý một coin một lúc
+                        break
                 
                 time.sleep(1)
                 
@@ -988,8 +1029,8 @@ class BaseBot:
                     self.last_error_log_time = time.time()
                 time.sleep(5)
 
-    def _process_single_symbol(self, symbol):
-        """Xử lý một symbol duy nhất - TRẢ VỀ True NẾU VỪA VÀO LỆNH THÀNH CÔNG"""
+    def _process_single_symbol_with_side_check(self, symbol):
+        """Xử lý symbol với kiểm tra hướng ưu tiên - TRẢ VỀ True NẾU VỪA VÀO LỆNH THÀNH CÔNG"""
         try:
             symbol_info = self.symbol_data[symbol]
             current_time = time.time()
@@ -1021,245 +1062,40 @@ class BaseBot:
                     entry_signal = self.coin_finder.get_entry_signal(symbol)
                     
                     if entry_signal:
+                        # Lấy hướng ưu tiên toàn cục
                         target_side = self.get_next_side_based_on_comprehensive_analysis()
                         
+                        # So sánh tín hiệu với hướng ưu tiên
                         if entry_signal == target_side:
                             if not self.coin_finder.has_existing_position(symbol):
                                 if self._open_symbol_position(symbol, target_side):
                                     symbol_info['last_trade_time'] = current_time
                                     return True  # 🎯 TRẢ VỀ True KHI VÀO LỆNH THÀNH CÔNG
+                        else:
+                            # TÍN HIỆU KHÔNG TRÙNG VỚI HƯỚNG ƯU TIÊN
+                            if self.bot_mode == 'dynamic':
+                                # BOT ĐỘNG: Từ bỏ coin, tìm coin mới
+                                self.log(f"🔀 {symbol} - Tín hiệu {entry_signal} không trùng với hướng ưu tiên {target_side}, từ bỏ coin")
+                                self.stop_symbol(symbol)
+                                # Bot sẽ quay lại vòng lặp chính để tìm coin mới
+                            else:
+                                # BOT TĨNH: Giữ nguyên coin, chờ tín hiệu phù hợp
+                                self.log(f"⏳ {symbol} - Tín hiệu {entry_signal} không trùng với hướng ưu tiên {target_side}, chờ tín hiệu mới")
+                            
+                            return False
                 return False
                 
         except Exception as e:
             self.log(f"❌ Lỗi xử lý {symbol}: {str(e)}")
             return False
 
-    def _check_pyramiding(self, symbol):
-        """
-        Nhồi KHI ĐANG LỖ (ROI âm), dùng ROI có đòn bẩy giống TP/SL,
-        và dùng mốc ROI cộng dồn:
-
-        - Lần 1: base_roi = 0  → nhồi khi ROI <= -pyramiding_x
-        - Nhồi xong: base_roi = ROI hiện tại (âm)
-        - Lần 2: nhồi khi ROI <= base_roi - pyramiding_x
-        - Lần 3: tương tự...
-
-        Dừng khi đã nhồi đủ self.pyramiding_n lần.
-        """
-        try:
-            if not self.pyramiding_enabled:
-                return False
-
-            info = self.symbol_data.get(symbol)
-            if not info or not info.get('position_open', False):
-                return False
-
-            # Đã nhồi đủ số lần
-            current_count = int(info.get('pyramiding_count', 0))
-            if current_count >= self.pyramiding_n:
-                return False
-
-            # Cooldown giữa các lần nhồi (60s)
-            current_time = time.time()
-            if current_time - info.get('last_pyramiding_time', 0) < 60:
-                return False
-
-            # ===== TÍNH ROI THEO ĐÒN BẨY (GIỐNG TP/SL) =====
-            current_price = self.get_current_price(symbol)
-            if current_price is None or current_price <= 0:
-                return False
-
-            entry = float(info.get('entry', 0))
-            qty   = abs(float(info.get('qty', 0)))
-            if entry <= 0 or qty <= 0:
-                return False
-
-            # Profit theo hướng BUY/SELL
-            if info.get('side') == "BUY":
-                profit = (current_price - entry) * qty
-            else:  # SELL
-                profit = (entry - current_price) * qty
-
-            invested = entry * qty / self.lev
-            if invested <= 0:
-                return False
-
-            roi = (profit / invested) * 100  # ROI có leverage
-
-            # CHỈ NHỒI KHI ĐANG LỖ (ROI âm)
-            if roi >= 0:
-                return False
-
-            step = float(self.pyramiding_x or 0)
-            if step <= 0:
-                return False
-
-            # ===== CƠ CHẾ MỐC: base_roi - step =====
-            # Lần đầu: base_roi = 0 → trigger = -step
-            # Sau mỗi lần nhồi: base_roi = roi tại thời điểm nhồi
-            base_roi = float(info.get('pyramiding_base_roi', 0.0))
-            target_roi = base_roi - step  # vì roi, base_roi đều âm hoặc 0
-
-            # Ví dụ: base=-40, step=50 → target=-90, nhồi khi roi <= -90
-            if roi > target_roi:
-                # Chưa lỗ đủ sâu so với mốc hiện tại
-                return False
-
-            # ===== ĐỦ ĐIỀU KIỆN → THỰC HIỆN NHỒI =====
-            self.log(
-                f"📉 {symbol} - ROI hiện tại {roi:.2f}% <= mốc nhồi {target_roi:.2f}% "
-                f"(mốc cũ: {base_roi:.2f}%, step: {step}%) → THỬ NHỒI..."
-            )
-
-            if self._pyramid_order(symbol):
-                new_count = current_count + 1
-                info['pyramiding_count'] = new_count
-                info['pyramiding_base_roi'] = roi          # mốc mới = ROI hiện tại
-                info['last_pyramiding_time'] = current_time
-
-                self.log(
-                    f"🔄 {symbol} - ĐÃ NHỒI LẦN {new_count}/{self.pyramiding_n} "
-                    f"tại ROI {roi:.2f}%. Mốc ROI mới: {roi:.2f}%"
-                )
-                return True
-
-            return False
-
-        except Exception as e:
-            self.log(f"❌ Lỗi kiểm tra nhồi lệnh {symbol}: {str(e)}")
-            return False
-
-    def _pyramid_order(self, symbol):
-        """Thực hiện lệnh nhồi (thêm lệnh cùng chiều)"""
-        try:
-            symbol_info = self.symbol_data[symbol]
-            if not symbol_info['position_open']:
-                return False
-            
-            side = symbol_info['side']  # Cùng chiều với lệnh ban đầu
-            
-            # Lấy số dư hiện tại
-            total_balance, available_balance = get_total_and_available_balance(
-                self.api_key, self.api_secret
-            )
-            if total_balance is None or total_balance <= 0:
-                self.log(f"❌ {symbol} - Không đủ tổng số dư để nhồi lệnh")
-                return False
-    
-            # Dùng tổng số dư để tính % vốn (giống lệnh đầu tiên)
-            balance = total_balance
-    
-            # Tính số tiền CẦN dùng theo % tổng số dư
-            required_usd = balance * (self.percent / 100)
-    
-            # Kiểm tra số dư khả dụng
-            if available_balance is None or available_balance <= 0 or required_usd > available_balance:
-                self.log(
-                    f"❌ {symbol} - Không đủ số dư khả dụng để nhồi lệnh:"
-                    f" cần {required_usd:.2f}, khả dụng {available_balance or 0:.2f}"
-                )
-                return False
-
-            current_price = self.get_current_price(symbol)
-            if current_price <= 0:
-                self.log(f"❌ {symbol} - Lỗi giá khi nhồi lệnh")
-                return False
-
-            # Tính khối lượng (giống cách tính ban đầu)
-            step_size = get_step_size(symbol, self.api_key, self.api_secret)
-            usd_amount = balance * (self.percent / 100)
-            qty = (usd_amount * self.lev) / current_price
-            if step_size > 0:
-                qty = math.floor(qty / step_size) * step_size
-                qty = round(qty, 8)
-
-            if qty <= 0 or qty < step_size:
-                self.log(f"❌ {symbol} - Khối lượng không hợp lệ khi nhồi lệnh")
-                return False
-
-            # Hủy tất cả lệnh chờ (nếu có)
-            cancel_all_orders(symbol, self.api_key, self.api_secret)
-            time.sleep(1)
-
-            # Đặt lệnh MARKET cùng chiều
-            result = place_order(symbol, side, qty, self.api_key, self.api_secret)
-            if result and 'orderId' in result:
-                executed_qty = float(result.get('executedQty', 0))
-                avg_price = float(result.get('avgPrice', current_price))
-
-                if executed_qty >= 0:
-                    # Cập nhật thông tin position (tổng khối lượng và giá trung bình)
-                    old_qty = symbol_info['qty']
-                    old_entry = symbol_info['entry']
-                    
-                    # Tính giá trung bình mới
-                    total_qty = abs(old_qty) + executed_qty
-                    if side == "BUY":
-                        new_qty = old_qty + executed_qty
-                        new_entry = (old_entry * abs(old_qty) + avg_price * executed_qty) / total_qty
-                    else:  # SELL (short)
-                        new_qty = old_qty - executed_qty  # old_qty âm, executed_qty dương
-                        new_entry = (old_entry * abs(old_qty) + avg_price * executed_qty) / total_qty
-                    
-                    symbol_info['qty'] = new_qty
-                    symbol_info['entry'] = new_entry
-                    
-                    message = (f"🔄 <b>NHỒI LỆNH {symbol}</b>\n"
-                              f"🤖 Bot: {self.bot_id}\n📌 Hướng: {side}\n"
-                              f"🏷️ Entry: {avg_price:.4f} (Trung bình: {new_entry:.4f})\n"
-                              f"📊 Khối lượng: {executed_qty:.4f} (Tổng: {abs(new_qty):.4f})\n"
-                              f"💰 Đòn bẩy: {self.lev}x\n🎯 Lần nhồi: {symbol_info.get('pyramiding_count', 0) + 1}/{self.pyramiding_n}")
-                    
-                    self.log(message)
-                    return True
-                else:
-                    self.log(f"❌ {symbol} - Nhồi lệnh không thành công")
-                    return False
-            else:
-                error_msg = result.get('msg', 'Lỗi không xác định') if result else 'Không có phản hồi'
-                self.log(f"❌ {symbol} - Lỗi nhồi lệnh: {error_msg}")
-                return False
-
-        except Exception as e:
-            self.log(f"❌ {symbol} - Lỗi nhồi lệnh: {str(e)}")
-            return False
-
-    def _check_smart_exit_condition(self, symbol):
-        try:
-            if not self.symbol_data[symbol]['position_open'] or not self.symbol_data[symbol]['roi_check_activated']:
-                return False
-            
-            current_price = self.get_current_price(symbol)
-            if current_price <= 0: return False
-            
-            if self.symbol_data[symbol]['side'] == "BUY":
-                profit = (current_price - self.symbol_data[symbol]['entry']) * abs(self.symbol_data[symbol]['qty'])
-            else:
-                profit = (self.symbol_data[symbol]['entry'] - current_price) * abs(self.symbol_data[symbol]['qty'])
-                
-            invested = self.symbol_data[symbol]['entry'] * abs(self.symbol_data[symbol]['qty']) / self.lev
-            if invested <= 0: return False
-                
-            current_roi = (profit / invested) * 100
-            
-            if current_roi >= self.roi_trigger:
-                exit_signal = self.coin_finder.get_exit_signal(symbol)
-                if exit_signal:
-                    reason = f"🎯 Đạt ROI {self.roi_trigger}% + Tín hiệu thoát (ROI: {current_roi:.2f}%)"
-                    self._close_symbol_position(symbol, reason)
-                    return True
-            return False
-            
-        except Exception as e:
-            self.log(f"❌ Lỗi kiểm tra thoát thông minh {symbol}: {str(e)}")
-            return False
-
-    def _find_and_add_new_coin(self):
-        """Tìm và thêm coin mới - TRẢ VỀ TÊN COIN HOẶC NONE"""
+    def _find_and_add_new_coin_ignore_side(self):
+        """Tìm coin BẤT KỲ có tín hiệu (BUY/SELL) - KHÔNG quan tâm đến hướng ưu tiên"""
         try:
             active_coins = self.coin_manager.get_active_coins()
             
-            new_symbol = self.coin_finder.find_best_coin_any_signal(
+            # Tìm coin có tín hiệu bất kỳ
+            new_symbol = self.coin_finder.find_coin_with_any_signal(
                 excluded_coins=active_coins,
                 required_leverage=self.lev
             )
@@ -1284,7 +1120,7 @@ class BaseBot:
         except Exception as e:
             self.log(f"❌ Lỗi tìm coin mới: {str(e)}")
             return None
-            
+
     def _add_symbol(self, symbol):
         if symbol in self.active_symbols or len(self.active_symbols) >= self.max_coins:
             return False
@@ -1425,7 +1261,6 @@ class BaseBot:
                     f" cần {required_usd:.2f}, khả dụng {available_balance or 0:.2f}"
                 )
                 return False
-
 
             current_price = self.get_current_price(symbol)
             if current_price <= 0:
@@ -1802,7 +1637,6 @@ class BaseBot:
     def get_next_side_based_on_comprehensive_analysis(self):
         """
         Lấy hướng ưu tiên toàn cục đã tính sẵn trong check_global_positions.
-        Không còn dùng PnL, chỉ dựa trên số lượng lệnh.
         """
         self.check_global_positions()
 
@@ -1821,17 +1655,239 @@ class BaseBot:
                              bot_token=self.telegram_bot_token, 
                              default_chat_id=self.telegram_chat_id)
 
+    def _check_smart_exit_condition(self, symbol):
+        try:
+            if not self.symbol_data[symbol]['position_open'] or not self.symbol_data[symbol]['roi_check_activated']:
+                return False
+            
+            current_price = self.get_current_price(symbol)
+            if current_price <= 0: return False
+            
+            if self.symbol_data[symbol]['side'] == "BUY":
+                profit = (current_price - self.symbol_data[symbol]['entry']) * abs(self.symbol_data[symbol]['qty'])
+            else:
+                profit = (self.symbol_data[symbol]['entry'] - current_price) * abs(self.symbol_data[symbol]['qty'])
+                
+            invested = self.symbol_data[symbol]['entry'] * abs(self.symbol_data[symbol]['qty']) / self.lev
+            if invested <= 0: return False
+                
+            current_roi = (profit / invested) * 100
+            
+            if current_roi >= self.roi_trigger:
+                exit_signal = self.coin_finder.get_exit_signal(symbol)
+                if exit_signal:
+                    reason = f"🎯 Đạt ROI {self.roi_trigger}% + Tín hiệu thoát (ROI: {current_roi:.2f}%)"
+                    self._close_symbol_position(symbol, reason)
+                    return True
+            return False
+            
+        except Exception as e:
+            self.log(f"❌ Lỗi kiểm tra thoát thông minh {symbol}: {str(e)}")
+            return False
+
+    def _check_pyramiding(self, symbol):
+        """
+        Nhồi KHI ĐANG LỖ (ROI âm), dùng ROI có đòn bẩy giống TP/SL,
+        và dùng mốc ROI cộng dồn:
+
+        - Lần 1: base_roi = 0  → nhồi khi ROI <= -pyramiding_x
+        - Nhồi xong: base_roi = ROI hiện tại (âm)
+        - Lần 2: nhồi khi ROI <= base_roi - pyramiding_x
+        - Lần 3: tương tự...
+
+        Dừng khi đã nhồi đủ self.pyramiding_n lần.
+        """
+        try:
+            if not self.pyramiding_enabled:
+                return False
+
+            info = self.symbol_data.get(symbol)
+            if not info or not info.get('position_open', False):
+                return False
+
+            # Đã nhồi đủ số lần
+            current_count = int(info.get('pyramiding_count', 0))
+            if current_count >= self.pyramiding_n:
+                return False
+
+            # Cooldown giữa các lần nhồi (60s)
+            current_time = time.time()
+            if current_time - info.get('last_pyramiding_time', 0) < 60:
+                return False
+
+            # ===== TÍNH ROI THEO ĐÒN BẨY (GIỐNG TP/SL) =====
+            current_price = self.get_current_price(symbol)
+            if current_price is None or current_price <= 0:
+                return False
+
+            entry = float(info.get('entry', 0))
+            qty   = abs(float(info.get('qty', 0)))
+            if entry <= 0 or qty <= 0:
+                return False
+
+            # Profit theo hướng BUY/SELL
+            if info.get('side') == "BUY":
+                profit = (current_price - entry) * qty
+            else:  # SELL
+                profit = (entry - current_price) * qty
+
+            invested = entry * qty / self.lev
+            if invested <= 0:
+                return False
+
+            roi = (profit / invested) * 100  # ROI có leverage
+
+            # CHỈ NHỒI KHI ĐANG LỖ (ROI âm)
+            if roi >= 0:
+                return False
+
+            step = float(self.pyramiding_x or 0)
+            if step <= 0:
+                return False
+
+            # ===== CƠ CHẾ MỐC: base_roi - step =====
+            # Lần đầu: base_roi = 0 → trigger = -step
+            # Sau mỗi lần nhồi: base_roi = roi tại thời điểm nhồi
+            base_roi = float(info.get('pyramiding_base_roi', 0.0))
+            target_roi = base_roi - step  # vì roi, base_roi đều âm hoặc 0
+
+            # Ví dụ: base=-40, step=50 → target=-90, nhồi khi roi <= -90
+            if roi > target_roi:
+                # Chưa lỗ đủ sâu so với mốc hiện tại
+                return False
+
+            # ===== ĐỦ ĐIỀU KIỆN → THỰC HIỆN NHỒI =====
+            self.log(
+                f"📉 {symbol} - ROI hiện tại {roi:.2f}% <= mốc nhồi {target_roi:.2f}% "
+                f"(mốc cũ: {base_roi:.2f}%, step: {step}%) → THỬ NHỒI..."
+            )
+
+            if self._pyramid_order(symbol):
+                new_count = current_count + 1
+                info['pyramiding_count'] = new_count
+                info['pyramiding_base_roi'] = roi          # mốc mới = ROI hiện tại
+                info['last_pyramiding_time'] = current_time
+
+                self.log(
+                    f"🔄 {symbol} - ĐÃ NHỒI LẦN {new_count}/{self.pyramiding_n} "
+                    f"tại ROI {roi:.2f}%. Mốc ROI mới: {roi:.2f}%"
+                )
+                return True
+
+            return False
+
+        except Exception as e:
+            self.log(f"❌ Lỗi kiểm tra nhồi lệnh {symbol}: {str(e)}")
+            return False
+
+    def _pyramid_order(self, symbol):
+        """Thực hiện lệnh nhồi (thêm lệnh cùng chiều)"""
+        try:
+            symbol_info = self.symbol_data[symbol]
+            if not symbol_info['position_open']:
+                return False
+            
+            side = symbol_info['side']  # Cùng chiều với lệnh ban đầu
+            
+            # Lấy số dư hiện tại
+            total_balance, available_balance = get_total_and_available_balance(
+                self.api_key, self.api_secret
+            )
+            if total_balance is None or total_balance <= 0:
+                self.log(f"❌ {symbol} - Không đủ tổng số dư để nhồi lệnh")
+                return False
+    
+            # Dùng tổng số dư để tính % vốn (giống lệnh đầu tiên)
+            balance = total_balance
+    
+            # Tính số tiền CẦN dùng theo % tổng số dư
+            required_usd = balance * (self.percent / 100)
+    
+            # Kiểm tra số dư khả dụng
+            if available_balance is None or available_balance <= 0 or required_usd > available_balance:
+                self.log(
+                    f"❌ {symbol} - Không đủ số dư khả dụng để nhồi lệnh:"
+                    f" cần {required_usd:.2f}, khả dụng {available_balance or 0:.2f}"
+                )
+                return False
+
+            current_price = self.get_current_price(symbol)
+            if current_price <= 0:
+                self.log(f"❌ {symbol} - Lỗi giá khi nhồi lệnh")
+                return False
+
+            # Tính khối lượng (giống cách tính ban đầu)
+            step_size = get_step_size(symbol, self.api_key, self.api_secret)
+            usd_amount = balance * (self.percent / 100)
+            qty = (usd_amount * self.lev) / current_price
+            if step_size > 0:
+                qty = math.floor(qty / step_size) * step_size
+                qty = round(qty, 8)
+
+            if qty <= 0 or qty < step_size:
+                self.log(f"❌ {symbol} - Khối lượng không hợp lệ khi nhồi lệnh")
+                return False
+
+            # Hủy tất cả lệnh chờ (nếu có)
+            cancel_all_orders(symbol, self.api_key, self.api_secret)
+            time.sleep(1)
+
+            # Đặt lệnh MARKET cùng chiều
+            result = place_order(symbol, side, qty, self.api_key, self.api_secret)
+            if result and 'orderId' in result:
+                executed_qty = float(result.get('executedQty', 0))
+                avg_price = float(result.get('avgPrice', current_price))
+
+                if executed_qty >= 0:
+                    # Cập nhật thông tin position (tổng khối lượng và giá trung bình)
+                    old_qty = symbol_info['qty']
+                    old_entry = symbol_info['entry']
+                    
+                    # Tính giá trung bình mới
+                    total_qty = abs(old_qty) + executed_qty
+                    if side == "BUY":
+                        new_qty = old_qty + executed_qty
+                        new_entry = (old_entry * abs(old_qty) + avg_price * executed_qty) / total_qty
+                    else:  # SELL (short)
+                        new_qty = old_qty - executed_qty  # old_qty âm, executed_qty dương
+                        new_entry = (old_entry * abs(old_qty) + avg_price * executed_qty) / total_qty
+                    
+                    symbol_info['qty'] = new_qty
+                    symbol_info['entry'] = new_entry
+                    
+                    message = (f"🔄 <b>NHỒI LỆNH {symbol}</b>\n"
+                              f"🤖 Bot: {self.bot_id}\n📌 Hướng: {side}\n"
+                              f"🏷️ Entry: {avg_price:.4f} (Trung bình: {new_entry:.4f})\n"
+                              f"📊 Khối lượng: {executed_qty:.4f} (Tổng: {abs(new_qty):.4f})\n"
+                              f"💰 Đòn bẩy: {self.lev}x\n🎯 Lần nhồi: {symbol_info.get('pyramiding_count', 0) + 1}/{self.pyramiding_n}")
+                    
+                    self.log(message)
+                    return True
+                else:
+                    self.log(f"❌ {symbol} - Nhồi lệnh không thành công")
+                    return False
+            else:
+                error_msg = result.get('msg', 'Lỗi không xác định') if result else 'Không có phản hồi'
+                self.log(f"❌ {symbol} - Lỗi nhồi lệnh: {error_msg}")
+                return False
+
+        except Exception as e:
+            self.log(f"❌ {symbol} - Lỗi nhồi lệnh: {str(e)}")
+            return False
+
 class GlobalMarketBot(BaseBot):
     def __init__(self, symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
                  api_key, api_secret, telegram_bot_token, telegram_chat_id, bot_id=None, **kwargs):
-        # Lấy tham số nhồi lệnh từ kwargs
+        # Lấy tham số nhồi lệnh và bot_mode từ kwargs
         pyramiding_n = kwargs.pop('pyramiding_n', 0)
         pyramiding_x = kwargs.pop('pyramiding_x', 0)
+        bot_mode = kwargs.pop('bot_mode', 'dynamic')
         
         super().__init__(symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
                          api_key, api_secret, telegram_bot_token, telegram_chat_id,
                          "RSI-Volume-System-Queue", bot_id=bot_id, 
-                         pyramiding_n=pyramiding_n, pyramiding_x=pyramiding_x, **kwargs)
+                         pyramiding_n=pyramiding_n, pyramiding_x=pyramiding_x, 
+                         bot_mode=bot_mode, **kwargs)
 
 # ========== LỚP QUẢN LÝ BOT ==========
 class BotManager:
@@ -1853,7 +1909,7 @@ class BotManager:
 
         if api_key and api_secret:
             self._verify_api_connection()
-            self.log("🟢 HỆ THỐNG BOT HÀNG ĐỢI ĐÃ KHỞI ĐỘNG - CƠ CHẾ FIFO")
+            self.log("🟢 HỆ THỐNG BOT HÀNG ĐỢI ĐÃ KHỞI ĐỘNG - LOGIC MỚI: CHỌN COIN TRƯỚC, SO SÁNH HƯỚNG SAU")
 
             self.telegram_thread = threading.Thread(target=self._telegram_listener, daemon=True)
             self.telegram_thread.start()
@@ -1920,10 +1976,11 @@ class BotManager:
                     'symbols': bot.active_symbols if hasattr(bot, 'active_symbols') else [],
                     'symbol_data': bot.symbol_data if hasattr(bot, 'symbol_data') else {},
                     'status': bot.status, 'leverage': bot.lev, 'percent': bot.percent,
-                    'pyramiding': f"{bot.pyramiding_n}/{bot.pyramiding_x}%" if hasattr(bot, 'pyramiding_enabled') and bot.pyramiding_enabled else "Tắt"
+                    'pyramiding': f"{bot.pyramiding_n}/{bot.pyramiding_x}%" if hasattr(bot, 'pyramiding_enabled') and bot.pyramiding_enabled else "Tắt",
+                    'bot_mode': bot.bot_mode if hasattr(bot, 'bot_mode') else 'dynamic'
                 })
             
-            summary = "📊 **THỐNG KÊ CHI TIẾT - HỆ THỐNG HÀNG ĐỢI**\n\n"
+            summary = "📊 **THỐNG KÊ CHI TIẾT - LOGIC MỚI: CHỌN COIN TRƯỚC**\n\n"
             
             balance = get_balance(self.api_key, self.api_secret)
             if balance is not None:
@@ -1932,7 +1989,8 @@ class BotManager:
             else:
                 summary += f"💰 **SỐ DƯ**: ❌ Lỗi kết nối\n\n"
             
-            summary += f"🤖 **SỐ BOT HỆ THỐNG**: {len(self.bots)} bot | {total_bots_with_coins} bot có coin | {trading_bots} bot đang giao dịch\n\n"
+            summary += f"🤖 **SỐ BOT HỆ THỐNG**: {len(self.bots)} bot\n"
+            summary += f"📊 Bot có coin: {total_bots_with_coins} | Bot đang giao dịch: {trading_bots}\n\n"
             
             summary += f"📈 **PHÂN TÍCH PnL VÀ KHỐI LƯỢNG**:\n"
             summary += f"   📊 Số lượng: LONG={total_long_count} | SHORT={total_short_count}\n"
@@ -1956,8 +2014,10 @@ class BotManager:
                 summary += "📋 **CHI TIẾT BOT**:\n"
                 for bot in bot_details:
                     status_emoji = "🟢" if bot['is_trading'] else "🟡" if bot['has_coin'] else "🔴"
-                    summary += f"{status_emoji} **{bot['bot_id']}**\n"
-                    summary += f"   💰 Đòn bẩy: {bot['leverage']}x | Vốn: {bot['percent']}% | Nhồi lệnh: {bot['pyramiding']}\n"
+                    mode_emoji = "🤖" if bot['bot_mode'] == 'static' else "🔄"
+                    summary += f"{status_emoji}{mode_emoji} **{bot['bot_id']}**\n"
+                    summary += f"   💰 Đòn bẩy: {bot['leverage']}x | Vốn: {bot['percent']}% | Chế độ: {bot['bot_mode']}\n"
+                    summary += f"   🔄 Nhồi lệnh: {bot['pyramiding']}\n"
                     
                     if bot['symbols']:
                         for symbol in bot['symbols']:
@@ -1995,13 +2055,14 @@ class BotManager:
 
     def send_main_menu(self, chat_id):
         welcome = (
-            "🤖 <b>BOT GIAO DỊCH FUTURES - HỆ THỐNG HÀNG ĐỢI (FIFO)</b>\n\n"
+            "🤖 <b>BOT GIAO DỊCH FUTURES - LOGIC MỚI: CHỌN COIN TRƯỚC</b>\n\n"
             "🎯 <b>CƠ CHẾ HOẠT ĐỘNG MỚI:</b>\n"
-            "• Sử dụng hàng đợi (FIFO) - Vào trước ra trước\n"
-            "• Bot đầu tiên trong hàng đợi tìm coin trước\n"
-            "• Bot vào lệnh → bot tiếp theo trong hàng đợi tìm NGAY LẬP TỨC\n"
-            "• Bot có coin KHÔNG THỂ vào hàng đợi\n"
-            "• Bot đóng lệnh có thể vào lại hàng đợi\n\n"
+            "1. <b>Chọn coin có tín hiệu trước</b> (BUY/SELL bất kỳ)\n"
+            "2. <b>So sánh với hướng ưu tiên toàn cục</b>\n"
+            "3. <b>Nếu trùng</b> → vào lệnh\n"
+            "4. <b>Nếu không trùng</b>:\n"
+            "   • Bot động: từ bỏ coin, tìm coin mới\n"
+            "   • Bot tĩnh: giữ coin, chờ tín hiệu phù hợp\n\n"
             
             "⚡ <b>TỐI ƯU HIỆU SUẤT:</b>\n"
             "• Cache đòn bẩy 5 phút\n"
@@ -2036,7 +2097,7 @@ class BotManager:
             self.log("❌ KHÔNG THỂ KẾT NỐI VỚI BINANCE - KHÔNG THỂ TẠO BOT")
             return False
         
-        bot_mode = kwargs.get('bot_mode', 'static')
+        bot_mode = kwargs.get('bot_mode', 'dynamic')
         # Lấy tham số nhồi lệnh
         pyramiding_n = kwargs.get('pyramiding_n', 0)
         pyramiding_x = kwargs.get('pyramiding_x', 0)
@@ -2059,7 +2120,8 @@ class BotManager:
                     self.api_key, self.api_secret, self.telegram_bot_token, self.telegram_chat_id,
                     coin_manager=self.coin_manager, symbol_locks=self.symbol_locks,
                     bot_coordinator=self.bot_coordinator, bot_id=bot_id, max_coins=1,
-                    pyramiding_n=pyramiding_n, pyramiding_x=pyramiding_x
+                    pyramiding_n=pyramiding_n, pyramiding_x=pyramiding_x,
+                    bot_mode=bot_mode  # TRUYỀN bot_mode vào
                 )
                 
                 bot._bot_manager = self
@@ -2074,7 +2136,7 @@ class BotManager:
             roi_info = f" | 🎯 ROI Kích hoạt: {roi_trigger}%" if roi_trigger else " | 🎯 ROI Kích hoạt: Tắt"
             pyramiding_info = f" | 🔄 Nhồi lệnh: {pyramiding_n} lần tại {pyramiding_x}%" if pyramiding_n > 0 and pyramiding_x > 0 else " | 🔄 Nhồi lệnh: Tắt"
             
-            success_msg = (f"✅ <b>ĐÃ TẠO {created_count} BOT HÀNG ĐỢI</b>\n\n"
+            success_msg = (f"✅ <b>ĐÃ TẠO {created_count} BOT THÀNH CÔNG</b>\n\n"
                           f"🎯 Chiến lược: {strategy_type}\n💰 Đòn bẩy: {lev}x\n"
                           f"📈 % Số dư: {percent}%\n🎯 TP: {tp}%\n"
                           f"🛡️ SL: {sl if sl is not None else 'Tắt'}%{roi_info}{pyramiding_info}\n"
@@ -2085,11 +2147,13 @@ class BotManager:
             else:
                 success_msg += f"🔗 Coin: Tự động tìm\n"
             
-            success_msg += (f"\n🔄 <b>HỆ THỐNG HÀNG ĐỢI ĐƯỢC KÍCH HOẠT</b>\n"
-                          f"• Bot đầu tiên trong hàng đợi tìm coin trước\n"
-                          f"• Bot vào lệnh → bot tiếp theo tìm NGAY LẬP TỨC\n"
-                          f"• Bot có coin không thể vào hàng đợi\n"
-                          f"• Bot đóng lệnh có thể vào lại hàng đợi\n\n")
+            success_msg += (f"\n🔄 <b>LOGIC MỚI: CHỌN COIN TRƯỚC, SO SÁNH HƯỚNG SAU</b>\n"
+                          f"1. Tìm coin có tín hiệu (BUY/SELL) bất kỳ\n"
+                          f"2. So sánh tín hiệu với hướng ưu tiên toàn cục\n"
+                          f"3. Nếu trùng → vào lệnh ngay\n"
+                          f"4. Nếu không trùng:\n"
+                          f"   • Bot động: từ bỏ coin, tìm coin mới\n"
+                          f"   • Bot tĩnh: giữ coin, chờ tín hiệu phù hợp\n\n")
             
             if pyramiding_n > 0:
                 success_msg += (f"🔄 <b>NHỒI LỆNH ĐƯỢC KÍCH HOẠT</b>\n"
@@ -2519,7 +2583,7 @@ class BotManager:
                              bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
                 return
             
-            send_telegram(f"🎯 <b>CHỌN SỐ LƯỢNG BOT</b>\n\n💰 Số dư hiện tại: <b>{balance:.2f} USDT</b>\n\nChọn số lượng bot (mỗi bot quản lý 1 coin):",
+            send_telegram(f"🎯 <b>CHỌN SỐ LƯỢNG BOT - LOGIC MỚI</b>\n\n💰 Số dư hiện tại: <b>{balance:.2f} USDT</b>\n\nChọn số lượng bot (mỗi bot quản lý 1 coin):",
                          chat_id=chat_id, reply_markup=create_bot_count_keyboard(),
                          bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
         
@@ -2596,8 +2660,16 @@ class BotManager:
         
         elif text == "🎯 Chiến lược":
             strategy_info = (
-                "🎯 <b>HỆ THỐNG RSI + VOLUME NÂNG CAO</b>\n\n"
-                "📈 <b>6 ĐIỀU KIỆN VÀO LỆNH:</b>\n"
+                "🎯 <b>HỆ THỐNG RSI + VOLUME - LOGIC MỚI</b>\n\n"
+                "🔄 <b>CƠ CHẾ HOẠT ĐỘNG MỚI:</b>\n"
+                "1. <b>Chọn coin có tín hiệu trước</b> (BUY/SELL bất kỳ)\n"
+                "2. <b>So sánh với hướng ưu tiên toàn cục</b>\n"
+                "3. <b>Nếu trùng</b> → vào lệnh ngay\n"
+                "4. <b>Nếu không trùng</b>:\n"
+                "   • Bot động: từ bỏ coin, tìm coin mới\n"
+                "   • Bot tĩnh: giữ coin, chờ tín hiệu phù hợp\n\n"
+                
+                "📈 <b>6 ĐIỀU KIỆN VÀO LỆNH RSI:</b>\n"
                 "1. RSI > 80 + giá tăng + volume tăng → SELL\n"
                 "2. RSI < 20 + giá giảm + volume giảm → SELL\n"  
                 "3. RSI > 80 + giá tăng + volume giảm → BUY\n"
@@ -2618,16 +2690,10 @@ class BotManager:
                 "• Tự động cập nhật giá trung bình\n"
                 "• Cơ chế: a=0 → đạt x% → nhồi → a=x → đạt 2x% → nhồi...\n\n"
                 
-                "🔄 <b>CƠ CHẾ PHỐI HỢP TUẦN TỰ:</b>\n"
-                "• Hàng đợi tuần tự cố định\n"
-                "• Chỉ 1 bot thực thi tại một thời điểm\n"
-                "• Bot đã thực thi chuyển đến cuối hàng đợi\n"
-                "• Chờ 1s giữa các bot\n\n"
-                
-                "🚫 <b>KIỂM TRA VỊ THẾ:</b>\n"
-                "• Tự động phát hiện coin có vị thế\n"
-                "• Không vào lệnh trên coin có vị thế\n"
-                "• Tự động chuyển sang coin khác"
+                "⚖️ <b>CƠ CHẾ CÂN BẰNG DANH MỤC:</b>\n"
+                "• Tự động tính tổng khối lượng LONG/SHORT\n"
+                "• Ưu tiên vào lệnh ngược với thiên hướng hiện tại\n"
+                "• Giúp cân bằng rủi ro toàn danh mục"
             )
             send_telegram(strategy_info, chat_id=chat_id,
                          bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
@@ -2638,7 +2704,14 @@ class BotManager:
             
             total_bots_with_coins, trading_bots = 0, 0
             pyramiding_bots = 0
+            static_bots, dynamic_bots = 0, 0
             for bot in self.bots.values():
+                if hasattr(bot, 'bot_mode'):
+                    if bot.bot_mode == 'static':
+                        static_bots += 1
+                    else:
+                        dynamic_bots += 1
+                
                 if hasattr(bot, 'active_symbols'):
                     if len(bot.active_symbols) > 0: total_bots_with_coins += 1
                     for symbol, data in bot.symbol_data.items():
@@ -2648,12 +2721,16 @@ class BotManager:
             
             config_info = (f"⚙️ <b>CẤU HÌNH HỆ THỐNG RSI + VOLUME</b>\n\n"
                           f"🔑 Binance API: {api_status}\n🤖 Tổng bot: {len(self.bots)}\n"
+                          f"🤖 Bot tĩnh: {static_bots} | 🔄 Bot động: {dynamic_bots}\n"
                           f"📊 Bot có coin: {total_bots_with_coins}\n"
                           f"🟢 Bot đang giao dịch: {trading_bots}\n"
                           f"🔄 Bot có nhồi lệnh: {pyramiding_bots}\n"
                           f"🌐 WebSocket: {len(self.ws_manager.connections)} kết nối\n"
                           f"🔄 Cooldown: 1s\n📋 Hàng đợi: {self.bot_coordinator.get_queue_info()['queue_size']} bot\n\n"
-                          f"🔄 <b>CƠ CHẾ TUẦN TỰ ĐANG HOẠT ĐỘNG</b>\n"
+                          f"🎯 <b>LOGIC MỚI ĐANG HOẠT ĐỘNG:</b>\n"
+                          f"1. Chọn coin có tín hiệu trước\n"
+                          f"2. So sánh với hướng ưu tiên\n"
+                          f"3. Trùng → vào lệnh | Không trùng → xử lý theo chế độ\n\n"
                           f"🎯 <b>6 ĐIỀU KIỆN RSI ĐANG HOẠT ĐỘNG</b>")
             send_telegram(config_info, chat_id=chat_id,
                          bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
@@ -2686,18 +2763,20 @@ class BotManager:
                 roi_info = f" | 🎯 ROI Kích hoạt: {roi_trigger}%" if roi_trigger else ""
                 pyramiding_info = f" | 🔄 Nhồi lệnh: {pyramiding_n} lần tại {pyramiding_x}%" if pyramiding_n > 0 and pyramiding_x > 0 else ""
                 
-                success_msg = (f"✅ <b>ĐÃ TẠO BOT THÀNH CÔNG</b>\n\n"
+                success_msg = (f"✅ <b>ĐÃ TẠO BOT THÀNH CÔNG - LOGIC MỚI</b>\n\n"
                               f"🤖 Chiến lược: RSI + Volume System\n🔧 Chế độ: {bot_mode}\n"
                               f"🔢 Số bot: {bot_count}\n💰 Đòn bẩy: {leverage}x\n"
                               f"📊 % Số dư: {percent}%\n🎯 TP: {tp}%\n"
                               f"🛡️ SL: {sl}%{roi_info}{pyramiding_info}")
                 if bot_mode == 'static' and symbol: success_msg += f"\n🔗 Coin: {symbol}"
                 
-                success_msg += (f"\n\n🔄 <b>HỆ THỐNG HÀNG ĐỢI ĐƯỢC KÍCH HOẠT</b>\n"
-                              f"• Bot đầu tiên trong hàng đợi tìm coin trước\n"
-                              f"• Bot vào lệnh → bot tiếp theo tìm NGAY LẬP TỨC\n"
-                              f"• Bot có coin không thể vào hàng đợi\n"
-                              f"• Bot đóng lệnh có thể vào lại hàng đợi\n\n")
+                success_msg += (f"\n\n🔄 <b>LOGIC HOẠT ĐỘNG MỚI:</b>\n"
+                              f"1. Tìm coin có tín hiệu (BUY/SELL) bất kỳ\n"
+                              f"2. So sánh tín hiệu với hướng ưu tiên toàn cục\n"
+                              f"3. Nếu trùng → vào lệnh ngay\n"
+                              f"4. Nếu không trùng:\n"
+                              f"   • Bot động: từ bỏ coin, tìm coin mới\n"
+                              f"   • Bot tĩnh: giữ coin, chờ tín hiệu phù hợp\n\n")
                 
                 if pyramiding_n > 0:
                     success_msg += (f"🔄 <b>NHỒI LỆNH ĐƯỢC KÍCH HOẠT</b>\n"
@@ -2722,4 +2801,4 @@ class BotManager:
             self.user_states[chat_id] = {}
 
 # Bypass SSL verification
-ssl._create_default_https_context = ssl._create_unverified_context                  
+ssl._create_default_https_context = ssl._create_unverified_context
