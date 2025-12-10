@@ -648,7 +648,7 @@ class SmartCoinFinder:
         rs = avg_gains / avg_losses
         return 100 - (100 / (1 + rs))
     
-    def get_rsi_signal(self, symbol, volume_threshold=20):
+    def get_rsi_signal(self, symbol, volume_threshold=50):
         try:
             current_time = time.time()
             cache_key = f"{symbol}_{volume_threshold}"
@@ -694,9 +694,9 @@ class SmartCoinFinder:
                 result = "BUY"
             elif rsi_current < 20 and price_decreasing and volume_increasing:
                 result = "BUY"
-            elif rsi_current > 20 and price_not_decreasing and volume_decreasing:
+            elif 45 > rsi_current > 20 and price_not_decreasing and volume_decreasing:
                 result = "BUY"
-            elif rsi_current < 80 and price_not_increasing and volume_increasing:
+            elif 55 < rsi_current < 80 and price_not_increasing and volume_increasing:
                 result = "SELL"
             else:
                 result = None
@@ -709,10 +709,10 @@ class SmartCoinFinder:
             return None
     
     def get_entry_signal(self, symbol):
-        return self.get_rsi_signal(symbol, volume_threshold=20)
+        return self.get_rsi_signal(symbol, volume_threshold=50)
     
     def get_exit_signal(self, symbol):
-        return self.get_rsi_signal(symbol, volume_threshold=40)
+        return self.get_rsi_signal(symbol, volume_threshold=100)
     
     def has_existing_position(self, symbol):
         try:
