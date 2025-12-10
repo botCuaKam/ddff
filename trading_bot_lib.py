@@ -26,10 +26,10 @@ _BINANCE_RATE_LOCK = threading.Lock()
 _BINANCE_MIN_INTERVAL = 0.1
 
 _USDC_CACHE = {"cặp": [], "cập_nhật_cuối": 0}
-_USDC_CACHE_TTL = 60
+_USDC_CACHE_TTL = 30
 
 _LEVERAGE_CACHE = {"dữ_liệu": {}, "cập_nhật_cuối": 0}
-_LEVERAGE_CACHE_TTL = 60
+_LEVERAGE_CACHE_TTL = 3600
 
 _SYMBOL_BLACKLIST = {'BTCUSDC', 'ETHUSDC'}
 
@@ -648,7 +648,7 @@ class SmartCoinFinder:
         rs = avg_gains / avg_losses
         return 100 - (100 / (1 + rs))
     
-    def get_rsi_signal(self, symbol, volume_threshold=50):
+    def get_rsi_signal(self, symbol, volume_threshold=30):
         try:
             current_time = time.time()
             cache_key = f"{symbol}_{volume_threshold}"
@@ -709,7 +709,7 @@ class SmartCoinFinder:
             return None
     
     def get_entry_signal(self, symbol):
-        return self.get_rsi_signal(symbol, volume_threshold=50)
+        return self.get_rsi_signal(symbol, volume_threshold=30)
     
     def get_exit_signal(self, symbol):
         return self.get_rsi_signal(symbol, volume_threshold=100)
@@ -744,7 +744,7 @@ class SmartCoinFinder:
                 max_lev = self.get_symbol_leverage(symbol)
                 if max_lev < required_leverage: continue
 
-                time.sleep(0.05)
+                time.sleep(1)
                 entry_signal = self.get_entry_signal(symbol)
                 if entry_signal in ["BUY", "SELL"]:
                     valid_symbols.append((symbol, entry_signal))
