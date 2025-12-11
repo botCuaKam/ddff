@@ -1071,7 +1071,7 @@ class BaseBot:
 
             entry = float(info.get('entry', 0))
             qty   = abs(float(info.get('qty', 0)))
-            if entry < 0 or qty < 0:
+            if entry <= 0 or qty <= 0:
                 return False
 
             # Profit theo hướng BUY/SELL
@@ -1081,7 +1081,7 @@ class BaseBot:
                 profit = (entry - current_price) * qty
 
             invested = entry * qty / self.lev
-            if invested < 0:
+            if invested <= 0:
                 return False
 
             roi = (profit / invested) * 100  # ROI có leverage
@@ -1091,7 +1091,7 @@ class BaseBot:
                 return False
 
             step = float(self.pyramiding_x or 0)
-            if step < 0:
+            if step <= 0:
                 return False
 
             # ===== CƠ CHẾ MỐC: base_roi - step =====
