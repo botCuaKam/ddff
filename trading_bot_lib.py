@@ -709,7 +709,7 @@ class SmartCoinFinder:
             return None
     
     def get_entry_signal(self, symbol):
-        return self.get_rsi_signal(symbol, volume_threshold=10)
+        return random.choice(["BUY", "SELL", None])
     
     def get_exit_signal(self, symbol):
         return self.get_rsi_signal(symbol, volume_threshold=100)
