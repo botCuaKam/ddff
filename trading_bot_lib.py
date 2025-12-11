@@ -648,7 +648,7 @@ class SmartCoinFinder:
         rs = avg_gains / avg_losses
         return 100 - (100 / (1 + rs))
     
-    def get_rsi_signal(self, symbol, volume_threshold=30):
+    def get_rsi_signal(self, symbol, volume_threshold=10):
         try:
             current_time = time.time()
             cache_key = f"{symbol}_{volume_threshold}"
@@ -694,9 +694,9 @@ class SmartCoinFinder:
                 result = "BUY"
             elif rsi_current < 20 and price_decreasing and volume_increasing:
                 result = "BUY"
-            elif 45 > rsi_current > 20 and price_not_decreasing and volume_decreasing:
+            elif rsi_current > 20 and price_not_decreasing and volume_decreasing:
                 result = "BUY"
-            elif 55 < rsi_current < 80 and price_not_increasing and volume_increasing:
+            elif rsi_current < 80 and price_not_increasing and volume_increasing:
                 result = "SELL"
             else:
                 result = None
@@ -709,7 +709,7 @@ class SmartCoinFinder:
             return None
     
     def get_entry_signal(self, symbol):
-        return self.get_rsi_signal(symbol, volume_threshold=30)
+        return self.get_rsi_signal(symbol, volume_threshold=10)
     
     def get_exit_signal(self, symbol):
         return self.get_rsi_signal(symbol, volume_threshold=100)
@@ -1071,7 +1071,7 @@ class BaseBot:
 
             entry = float(info.get('entry', 0))
             qty   = abs(float(info.get('qty', 0)))
-            if entry <= 0 or qty <= 0:
+            if entry < 0 or qty < 0:
                 return False
 
             # Profit theo hướng BUY/SELL
@@ -1081,7 +1081,7 @@ class BaseBot:
                 profit = (entry - current_price) * qty
 
             invested = entry * qty / self.lev
-            if invested <= 0:
+            if invested < 0:
                 return False
 
             roi = (profit / invested) * 100  # ROI có leverage
@@ -1091,7 +1091,7 @@ class BaseBot:
                 return False
 
             step = float(self.pyramiding_x or 0)
-            if step <= 0:
+            if step < 0:
                 return False
 
             # ===== CƠ CHẾ MỐC: base_roi - step =====
@@ -1161,7 +1161,7 @@ class BaseBot:
                 return False
 
             current_price = self.get_current_price(symbol)
-            if current_price <= 0:
+            if current_price < 0:
                 self.log(f"❌ {symbol} - Lỗi giá khi nhồi lệnh")
                 return False
 
