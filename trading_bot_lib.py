@@ -85,7 +85,7 @@ def create_cancel_keyboard():
 
 def create_bot_count_keyboard():
     return {
-        "keyboard": [[{"text": "1"}, {"text": "2"}, {"text": "3"}], [{"text": "5"}, {"text": "10"}], [{"text": "❌ Hủy bỏ"}]],
+        "keyboard": [[{"text": "1"}, {"text": "3"}, {"text": "5"}], [{"text": "10"}, {"text": "20"}], [{"text": "❌ Hủy bỏ"}]],
         "resize_keyboard": True, "one_time_keyboard": True
     }
 
@@ -183,8 +183,8 @@ def create_pyramiding_n_keyboard():
 def create_pyramiding_x_keyboard():
     return {
         "keyboard": [
-            [{"text": "10"}, {"text": "20"}, {"text": "30"}],
-            [{"text": "40"}, {"text": "50"}, {"text": "100"}],
+            [{"text": "100"}, {"text": "200"}, {"text": "300"}],
+            [{"text": "400"}, {"text": "500"}, {"text": "1000"}],
             [{"text": "❌ Hủy bỏ"}]
         ],
         "resize_keyboard": True, "one_time_keyboard": True
