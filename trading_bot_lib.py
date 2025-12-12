@@ -2227,7 +2227,7 @@ class BotManager:
             else:
                 try:
                     bot_count = int(text)
-                    if bot_count <= 0 or bot_count > 10:
+                    if bot_count <= 0 or bot_count > 20:
                         send_telegram("⚠️ Số bot phải từ 1-10. Vui lòng chọn:",
                                     chat_id=chat_id, reply_markup=create_bot_count_keyboard(),
                                     bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
