@@ -3,9 +3,6 @@ from trading_bot_lib_part3 import BotManager
 import os
 import json
 import time
-from dotenv import load_dotenv
-load_dotenv()
-
 
 # Lấy cấu hình từ biến môi trường
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
@@ -73,6 +70,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
