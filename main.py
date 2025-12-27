@@ -1,8 +1,11 @@
 # main.py
-from trading_bot_lib import BotManager
+from trading_bot_lib_part3 import BotManager
 import os
 import json
 import time
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # Lấy cấu hình từ biến môi trường
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
@@ -39,8 +42,6 @@ def main():
         telegram_bot_token=TELEGRAM_BOT_TOKEN,
         telegram_chat_id=TELEGRAM_CHAT_ID
     )
-    if not manager.running:
-        print("🔴 BotManager.running đã bị đặt thành False ngay sau khởi tạo!")
     
     # Thêm các bot từ cấu hình
     if BOT_CONFIGS:
