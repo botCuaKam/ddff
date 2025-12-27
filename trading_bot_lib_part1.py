@@ -109,7 +109,7 @@ def create_bot_mode_keyboard():
 def create_symbols_keyboard():
     """Tạo bàn phím chọn coin"""
     try:
-        symbols = get_all_USDT_pairs(limit=12) or ["BNBUSDT", "ADAUSDT", "DOGEUSDT", "XRPUSDT", "DOTUSDT", "LINKUSDT", "SOLUSDT", "MATICUSDT"]
+        symbols = get_all_usdt_pairs(limit=12) or ["BNBUSDT", "ADAUSDT", "DOGEUSDT", "XRPUSDT", "DOTUSDT", "LINKUSDT", "SOLUSDT", "MATICUSDT"]
     except:
         symbols = ["BNBUSDT", "ADAUSDT", "DOGEUSDT", "XRPUSDT", "DOTUSDT", "LINKUSDT", "SOLUSDT", "MATICUSDT"]
     
@@ -406,7 +406,7 @@ def binance_api_request(url, method='GET', params=None, headers=None):
     logger.error(f"Thất bại yêu cầu API sau {max_retries} lần thử")
     return None
 
-def get_all_USDT_pairs(limit=50):
+def get_all_usdt_pairs(limit=50):
     """Lấy danh sách tất cả cặp USDT đang giao dịch"""
     global _USDT_CACHE
     try:
@@ -418,17 +418,17 @@ def get_all_USDT_pairs(limit=50):
         data = binance_api_request(url)
         if not data: return []
 
-        USDT_pairs = []
+        usdt_pairs = []
         for symbol_info in data.get('symbols', []):
             symbol = symbol_info.get('symbol', '')
             if (symbol.endswith('USDT') and symbol_info.get('status') == 'TRADING' 
                 and symbol not in _SYMBOL_BLACKLIST):
-                USDT_pairs.append(symbol)
+                usdt_pairs.append(symbol)
 
-        _USDT_CACHE["cặp"] = USDT_pairs
+        _USDT_CACHE["cặp"] = usdt_pairs
         _USDT_CACHE["cập_nhật_cuối"] = now
-        logger.info(f"✅ Đã lấy {len(USDT_pairs)} cặp USDT (loại trừ BTC/ETH)")
-        return USDT_pairs[:limit]
+        logger.info(f"✅ Đã lấy {len(usdt_pairs)} cặp USDT (loại trừ BTC/ETH)")
+        return usdt_pairs[:limit]
 
     except Exception as e:
         logger.error(f"❌ Lỗi lấy danh sách coin: {str(e)}")
@@ -1069,4 +1069,5 @@ class WebSocketManager:
             self.remove_symbol(symbol)
 
 # Bypass SSL verification
+
 ssl._create_default_https_context = ssl._create_unverified_context
