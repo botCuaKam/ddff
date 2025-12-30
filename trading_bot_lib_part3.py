@@ -512,14 +512,15 @@ class BotManager:
                 
                 # Tạo bot
                 bot = bot_class(
-                    symbol if bot_mode == 'static' else None,
-                    lev, percent, tp, sl, roi_trigger, self.ws_manager,
-                    self.api_key, self.api_secret, self.telegram_bot_token, self.telegram_chat_id,
-                    coin_manager=self.coin_manager, symbol_locks=self.symbol_locks,
-                    bot_coordinator=self.bot_coordinator, bot_id=bot_id, max_coins=1,
-                    pyramiding_n=pyramiding_n, pyramiding_x=pyramiding_x,
-                    **extra_params
-                )
+                symbol if bot_mode == 'static' else None,
+                lev, percent, tp, sl, roi_trigger, self.ws_manager,
+                self.api_key, self.api_secret, self.telegram_bot_token, self.telegram_chat_id,
+                coin_manager=self.coin_manager, symbol_locks=self.symbol_locks,
+                bot_coordinator=self.bot_coordinator, bot_id=bot_id, max_coins=1,
+                pyramiding_n=pyramiding_n, pyramiding_x=pyramiding_x,
+                **extra_params
+            )
+
                 
                 self.bots[bot_id] = bot
                 created_count += 1
