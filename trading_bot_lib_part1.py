@@ -1,5 +1,5 @@
 # trading_bot_lib_part1.py
-# PHẦN 1: CÁC HÀM CƠ SỞ - CẬP NHẬT THÊM PHÂN TÍCH THỰC TẾ
+# PHẦN 1: CÁC HÀM CƠ SỞ VÀ DATABASE
 import json
 import hmac
 import hashlib
@@ -16,10 +16,536 @@ import math
 import traceback
 import random
 import queue
-from datetime import datetime
+import psycopg2
+from psycopg2 import pool
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import ssl
+from typing import Optional, Dict, List, Tuple, Any
+
+# ========== CẤU HÌNH DATABASE ==========
+class DatabaseManager:
+    """Quản lý kết nối và thao tác với PostgreSQL"""
+    
+    _connection_pool = None
+    _instance = None
+    _lock = threading.Lock()
+    
+    @classmethod
+    def get_instance(cls):
+        """Singleton pattern để quản lý kết nối database"""
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+    
+    def __init__(self):
+        """Khởi tạo connection pool"""
+        if DatabaseManager._connection_pool is None:
+            self._init_connection_pool()
+    
+    def _init_connection_pool(self):
+        """Khởi tạo connection pool từ biến môi trường"""
+        try:
+            # Railway cung cấp DATABASE_URL dạng: postgresql://user:password@host:port/database
+            database_url = os.getenv('DATABASE_URL')
+            
+            if not database_url:
+                # Fallback cho local development
+                database_url = "postgresql://postgres:password@localhost:5432/trading_bot"
+                logger.warning("⚠️ Sử dụng database URL mặc định cho local")
+            
+            # Parse DATABASE_URL
+            if database_url.startswith("postgres://"):
+                database_url = database_url.replace("postgres://", "postgresql://")
+            
+            # Tạo connection pool
+            DatabaseManager._connection_pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=20,
+                dsn=database_url,
+                sslmode='require' if 'railway' in database_url else 'prefer'
+            )
+            
+            logger.info("✅ Đã khởi tạo PostgreSQL connection pool")
+            
+            # Khởi tạo bảng
+            self._init_tables()
+            
+        except Exception as e:
+            logger.error(f"❌ Lỗi khởi tạo database: {str(e)}")
+            DatabaseManager._connection_pool = None
+    
+    def _init_tables(self):
+        """Khởi tạo các bảng trong database"""
+        init_queries = [
+            # Bảng cấu hình bot
+            """
+            CREATE TABLE IF NOT EXISTS bot_configs (
+                id SERIAL PRIMARY KEY,
+                bot_id VARCHAR(100) UNIQUE NOT NULL,
+                bot_mode VARCHAR(20) NOT NULL, -- 'static' hoặc 'dynamic'
+                bot_type VARCHAR(50) NOT NULL, -- 'BalanceProtectionBot', 'CompoundProfitBot', 'StaticMarketBot'
+                symbol VARCHAR(20),
+                leverage INTEGER NOT NULL,
+                percent FLOAT NOT NULL,
+                tp FLOAT,
+                sl FLOAT,
+                roi_trigger FLOAT,
+                pyramiding_n INTEGER DEFAULT 0,
+                pyramiding_x FLOAT DEFAULT 0,
+                dynamic_strategy VARCHAR(20), -- 'volume' hoặc 'volatility'
+                static_entry_mode VARCHAR(20), -- 'signal', 'reverse', 'wait'
+                reverse_on_stop BOOLEAN DEFAULT FALSE,
+                telegram_chat_id VARCHAR(50),
+                api_key VARCHAR(200),
+                api_secret VARCHAR(200),
+                status VARCHAR(20) DEFAULT 'running',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP
+            )
+            """,
+            
+            # Bảng vị thế đang mở
+            """
+            CREATE TABLE IF NOT EXISTS bot_positions (
+                id SERIAL PRIMARY KEY,
+                bot_id VARCHAR(100) NOT NULL,
+                symbol VARCHAR(20) NOT NULL,
+                side VARCHAR(10) NOT NULL, -- 'BUY' hoặc 'SELL'
+                entry_price FLOAT NOT NULL,
+                quantity FLOAT NOT NULL,
+                current_price FLOAT,
+                roi FLOAT DEFAULT 0,
+                tp_price FLOAT,
+                sl_price FLOAT,
+                pyramiding_count INTEGER DEFAULT 0,
+                status VARCHAR(20) DEFAULT 'open', -- 'open', 'closed', 'pending_close'
+                opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                closed_at TIMESTAMP,
+                last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (bot_id) REFERENCES bot_configs(bot_id) ON DELETE CASCADE
+            )
+            """,
+            
+            # Bảng lịch sử giao dịch
+            """
+            CREATE TABLE IF NOT EXISTS trade_history (
+                id SERIAL PRIMARY KEY,
+                bot_id VARCHAR(100) NOT NULL,
+                symbol VARCHAR(20) NOT NULL,
+                side VARCHAR(10) NOT NULL, -- 'OPEN_BUY', 'OPEN_SELL', 'CLOSE_BUY', 'CLOSE_SELL'
+                price FLOAT NOT NULL,
+                quantity FLOAT NOT NULL,
+                pnl FLOAT,
+                roi FLOAT,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (bot_id) REFERENCES bot_configs(bot_id) ON DELETE SET NULL
+            )
+            """,
+            
+            # Bảng thống kê
+            """
+            CREATE TABLE IF NOT EXISTS bot_statistics (
+                id SERIAL PRIMARY KEY,
+                bot_id VARCHAR(100) NOT NULL,
+                total_trades INTEGER DEFAULT 0,
+                winning_trades INTEGER DEFAULT 0,
+                losing_trades INTEGER DEFAULT 0,
+                total_pnl FLOAT DEFAULT 0,
+                max_drawdown FLOAT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (bot_id) REFERENCES bot_configs(bot_id) ON DELETE CASCADE
+            )
+            """,
+            
+            # Bảng coin blacklist
+            """
+            CREATE TABLE IF NOT EXISTS coin_blacklist (
+                id SERIAL PRIMARY KEY,
+                symbol VARCHAR(20) UNIQUE NOT NULL,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by VARCHAR(100)
+            )
+            """,
+            
+            # Tạo indexes
+            "CREATE INDEX IF NOT EXISTS idx_bot_configs_status ON bot_configs(status)",
+            "CREATE INDEX IF NOT EXISTS idx_bot_positions_status ON bot_positions(status)",
+            "CREATE INDEX IF NOT EXISTS idx_bot_positions_bot_id ON bot_positions(bot_id)",
+            "CREATE INDEX IF NOT EXISTS idx_trade_history_bot_id ON trade_history(bot_id)",
+            "CREATE INDEX IF NOT EXISTS idx_trade_history_created_at ON trade_history(created_at)"
+        ]
+        
+        conn = None
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            for query in init_queries:
+                cursor.execute(query)
+            
+            conn.commit()
+            logger.info("✅ Đã khởi tạo các bảng database")
+            
+        except Exception as e:
+            logger.error(f"❌ Lỗi khởi tạo bảng: {str(e)}")
+            if conn:
+                conn.rollback()
+        finally:
+            if conn:
+                self.return_connection(conn)
+    
+    def get_connection(self):
+        """Lấy connection từ pool"""
+        if self._connection_pool is None:
+            self._init_connection_pool()
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return self._connection_pool.getconn()
+            except Exception as e:
+                logger.error(f"Lỗi lấy connection (lần {attempt+1}): {str(e)}")
+                time.sleep(1)
+        
+        raise Exception("Không thể kết nối đến database")
+    
+    def return_connection(self, conn):
+        """Trả connection về pool"""
+        try:
+            self._connection_pool.putconn(conn)
+        except Exception as e:
+            logger.error(f"Lỗi trả connection: {str(e)}")
+    
+    def execute_query(self, query: str, params: tuple = None, return_result: bool = False):
+        """Thực thi query và trả về kết quả nếu cần"""
+        conn = None
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            
+            if return_result:
+                result = cursor.fetchall()
+                conn.commit()
+                return result
+            else:
+                conn.commit()
+                return True
+                
+        except Exception as e:
+            logger.error(f"Lỗi execute query: {str(e)}")
+            if conn:
+                conn.rollback()
+            return None
+        finally:
+            if conn:
+                self.return_connection(conn)
+    
+    def save_bot_config(self, bot_data: Dict[str, Any]) -> bool:
+        """Lưu cấu hình bot vào database"""
+        query = """
+        INSERT INTO bot_configs (
+            bot_id, bot_mode, bot_type, symbol, leverage, percent, tp, sl,
+            roi_trigger, pyramiding_n, pyramiding_x, dynamic_strategy,
+            static_entry_mode, reverse_on_stop, telegram_chat_id, api_key,
+            api_secret, status
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (bot_id) DO UPDATE SET
+            bot_mode = EXCLUDED.bot_mode,
+            bot_type = EXCLUDED.bot_type,
+            symbol = EXCLUDED.symbol,
+            leverage = EXCLUDED.leverage,
+            percent = EXCLUDED.percent,
+            tp = EXCLUDED.tp,
+            sl = EXCLUDED.sl,
+            roi_trigger = EXCLUDED.roi_trigger,
+            pyramiding_n = EXCLUDED.pyramiding_n,
+            pyramiding_x = EXCLUDED.pyramiding_x,
+            dynamic_strategy = EXCLUDED.dynamic_strategy,
+            static_entry_mode = EXCLUDED.static_entry_mode,
+            reverse_on_stop = EXCLUDED.reverse_on_stop,
+            updated_at = CURRENT_TIMESTAMP,
+            status = EXCLUDED.status
+        """
+        
+        params = (
+            bot_data.get('bot_id'),
+            bot_data.get('bot_mode'),
+            bot_data.get('bot_type'),
+            bot_data.get('symbol'),
+            bot_data.get('leverage'),
+            bot_data.get('percent'),
+            bot_data.get('tp'),
+            bot_data.get('sl'),
+            bot_data.get('roi_trigger'),
+            bot_data.get('pyramiding_n', 0),
+            bot_data.get('pyramiding_x', 0),
+            bot_data.get('dynamic_strategy'),
+            bot_data.get('static_entry_mode'),
+            bot_data.get('reverse_on_stop', False),
+            bot_data.get('telegram_chat_id'),
+            bot_data.get('api_key'),
+            bot_data.get('api_secret'),
+            bot_data.get('status', 'running')
+        )
+        
+        return self.execute_query(query, params) is not None
+    
+    def get_bot_config(self, bot_id: str) -> Optional[Dict]:
+        """Lấy cấu hình bot từ database"""
+        query = "SELECT * FROM bot_configs WHERE bot_id = %s AND deleted_at IS NULL"
+        result = self.execute_query(query, (bot_id,), return_result=True)
+        
+        if result and len(result) > 0:
+            columns = ['id', 'bot_id', 'bot_mode', 'bot_type', 'symbol', 'leverage', 'percent', 
+                      'tp', 'sl', 'roi_trigger', 'pyramiding_n', 'pyramiding_x', 'dynamic_strategy',
+                      'static_entry_mode', 'reverse_on_stop', 'telegram_chat_id', 'api_key', 
+                      'api_secret', 'status', 'created_at', 'updated_at', 'deleted_at']
+            
+            return dict(zip(columns, result[0]))
+        
+        return None
+    
+    def get_all_bots(self, status: str = None) -> List[Dict]:
+        """Lấy tất cả bot từ database"""
+        if status:
+            query = "SELECT * FROM bot_configs WHERE status = %s AND deleted_at IS NULL"
+            result = self.execute_query(query, (status,), return_result=True)
+        else:
+            query = "SELECT * FROM bot_configs WHERE deleted_at IS NULL"
+            result = self.execute_query(query, return_result=True)
+        
+        if result:
+            columns = ['id', 'bot_id', 'bot_mode', 'bot_type', 'symbol', 'leverage', 'percent', 
+                      'tp', 'sl', 'roi_trigger', 'pyramiding_n', 'pyramiding_x', 'dynamic_strategy',
+                      'static_entry_mode', 'reverse_on_stop', 'telegram_chat_id', 'api_key', 
+                      'api_secret', 'status', 'created_at', 'updated_at', 'deleted_at']
+            
+            return [dict(zip(columns, row)) for row in result]
+        
+        return []
+    
+    def update_bot_status(self, bot_id: str, status: str) -> bool:
+        """Cập nhật trạng thái bot"""
+        query = "UPDATE bot_configs SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE bot_id = %s"
+        return self.execute_query(query, (status, bot_id)) is not None
+    
+    def save_position(self, position_data: Dict[str, Any]) -> bool:
+        """Lưu vị thế vào database"""
+        query = """
+        INSERT INTO bot_positions (
+            bot_id, symbol, side, entry_price, quantity, current_price,
+            roi, tp_price, sl_price, pyramiding_count, status
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (bot_id, symbol) DO UPDATE SET
+            current_price = EXCLUDED.current_price,
+            roi = EXCLUDED.roi,
+            pyramiding_count = EXCLUDED.pyramiding_count,
+            status = EXCLUDED.status,
+            last_update = CURRENT_TIMESTAMP
+        """
+        
+        params = (
+            position_data.get('bot_id'),
+            position_data.get('symbol'),
+            position_data.get('side'),
+            position_data.get('entry_price'),
+            position_data.get('quantity'),
+            position_data.get('current_price'),
+            position_data.get('roi', 0),
+            position_data.get('tp_price'),
+            position_data.get('sl_price'),
+            position_data.get('pyramiding_count', 0),
+            position_data.get('status', 'open')
+        )
+        
+        return self.execute_query(query, params) is not None
+    
+    def get_open_positions(self, bot_id: str = None) -> List[Dict]:
+        """Lấy tất cả vị thế đang mở"""
+        if bot_id:
+            query = "SELECT * FROM bot_positions WHERE status = 'open' AND bot_id = %s"
+            result = self.execute_query(query, (bot_id,), return_result=True)
+        else:
+            query = "SELECT * FROM bot_positions WHERE status = 'open'"
+            result = self.execute_query(query, return_result=True)
+        
+        if result:
+            columns = ['id', 'bot_id', 'symbol', 'side', 'entry_price', 'quantity', 
+                      'current_price', 'roi', 'tp_price', 'sl_price', 'pyramiding_count',
+                      'status', 'opened_at', 'closed_at', 'last_update']
+            
+            return [dict(zip(columns, row)) for row in result]
+        
+        return []
+    
+    def close_position(self, bot_id: str, symbol: str, pnl: float = None, roi: float = None) -> bool:
+        """Đóng vị thế (đánh dấu là closed)"""
+        query = """
+        UPDATE bot_positions 
+        SET status = 'closed', closed_at = CURRENT_TIMESTAMP, 
+            current_price = %s, roi = %s
+        WHERE bot_id = %s AND symbol = %s AND status = 'open'
+        """
+        
+        # Lấy giá hiện tại để tính toán
+        from trading_bot_lib_part1 import get_current_price
+        current_price = get_current_price(symbol)
+        
+        return self.execute_query(query, (current_price, roi, bot_id, symbol)) is not None
+    
+    def save_trade_history(self, trade_data: Dict[str, Any]) -> bool:
+        """Lưu lịch sử giao dịch"""
+        query = """
+        INSERT INTO trade_history (
+            bot_id, symbol, side, price, quantity, pnl, roi, reason
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        params = (
+            trade_data.get('bot_id'),
+            trade_data.get('symbol'),
+            trade_data.get('side'),
+            trade_data.get('price'),
+            trade_data.get('quantity'),
+            trade_data.get('pnl'),
+            trade_data.get('roi'),
+            trade_data.get('reason', '')
+        )
+        
+        return self.execute_query(query, params) is not None
+    
+    def get_trade_history(self, bot_id: str = None, limit: int = 100) -> List[Dict]:
+        """Lấy lịch sử giao dịch"""
+        if bot_id:
+            query = """
+            SELECT * FROM trade_history 
+            WHERE bot_id = %s 
+            ORDER BY created_at DESC 
+            LIMIT %s
+            """
+            result = self.execute_query(query, (bot_id, limit), return_result=True)
+        else:
+            query = "SELECT * FROM trade_history ORDER BY created_at DESC LIMIT %s"
+            result = self.execute_query(query, (limit,), return_result=True)
+        
+        if result:
+            columns = ['id', 'bot_id', 'symbol', 'side', 'price', 'quantity', 
+                      'pnl', 'roi', 'reason', 'created_at']
+            
+            return [dict(zip(columns, row)) for row in result]
+        
+        return []
+    
+    def update_statistics(self, bot_id: str, pnl: float, is_win: bool) -> bool:
+        """Cập nhật thống kê bot"""
+        # Kiểm tra xem đã có thống kê chưa
+        check_query = "SELECT id FROM bot_statistics WHERE bot_id = %s"
+        check_result = self.execute_query(check_query, (bot_id,), return_result=True)
+        
+        if check_result:
+            # Update existing
+            if is_win:
+                query = """
+                UPDATE bot_statistics 
+                SET total_trades = total_trades + 1,
+                    winning_trades = winning_trades + 1,
+                    total_pnl = total_pnl + %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE bot_id = %s
+                """
+            else:
+                query = """
+                UPDATE bot_statistics 
+                SET total_trades = total_trades + 1,
+                    losing_trades = losing_trades + 1,
+                    total_pnl = total_pnl + %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE bot_id = %s
+                """
+        else:
+            # Insert new
+            if is_win:
+                query = """
+                INSERT INTO bot_statistics 
+                (bot_id, total_trades, winning_trades, losing_trades, total_pnl)
+                VALUES (%s, 1, 1, 0, %s)
+                """
+            else:
+                query = """
+                INSERT INTO bot_statistics 
+                (bot_id, total_trades, winning_trades, losing_trades, total_pnl)
+                VALUES (%s, 1, 0, 1, %s)
+                """
+        
+        return self.execute_query(query, (pnl, bot_id)) is not None
+    
+    def get_statistics(self, bot_id: str = None) -> Dict:
+        """Lấy thống kê"""
+        if bot_id:
+            query = "SELECT * FROM bot_statistics WHERE bot_id = %s"
+            result = self.execute_query(query, (bot_id,), return_result=True)
+        else:
+            query = """
+            SELECT 
+                COUNT(DISTINCT bot_id) as total_bots,
+                SUM(total_trades) as total_trades,
+                SUM(winning_trades) as winning_trades,
+                SUM(losing_trades) as losing_trades,
+                SUM(total_pnl) as total_pnl
+            FROM bot_statistics
+            """
+            result = self.execute_query(query, return_result=True)
+        
+        if result and len(result) > 0:
+            if bot_id:
+                columns = ['id', 'bot_id', 'total_trades', 'winning_trades', 
+                          'losing_trades', 'total_pnl', 'max_drawdown', 
+                          'created_at', 'updated_at']
+                return dict(zip(columns, result[0]))
+            else:
+                columns = ['total_bots', 'total_trades', 'winning_trades', 
+                          'losing_trades', 'total_pnl']
+                return dict(zip(columns, result[0]))
+        
+        return {}
+    
+    def cleanup_old_data(self, days: int = 30) -> bool:
+        """Dọn dẹp dữ liệu cũ (tự động xóa vị thế đã đóng và history cũ)"""
+        try:
+            # Xóa vị thế đã đóng quá 7 ngày
+            query1 = """
+            DELETE FROM bot_positions 
+            WHERE status = 'closed' 
+            AND closed_at < CURRENT_TIMESTAMP - INTERVAL '7 days'
+            """
+            
+            # Xóa lịch sử giao dịch quá 'days' ngày
+            query2 = f"""
+            DELETE FROM trade_history 
+            WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '{days} days'
+            """
+            
+            self.execute_query(query1)
+            self.execute_query(query2)
+            
+            logger.info(f"✅ Đã dọn dẹp dữ liệu cũ (> {days} ngày)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Lỗi cleanup database: {str(e)}")
+            return False
 
 # ========== CẤU HÌNH & HẰNG SỐ ==========
 _BINANCE_LAST_REQUEST_TIME = 0
@@ -38,13 +564,20 @@ _SYMBOL_BLACKLIST = {'BTCUSDT', 'ETHUSDT'}
 def setup_logging():
     """Thiết lập hệ thống logging cho toàn bộ ứng dụng"""
     logging.basicConfig(
-        level=logging.WARNING,
+        level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(module)s - %(message)s',
-        handlers=[logging.StreamHandler(), logging.FileHandler('bot_errors.log')]
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler('bot_errors.log'),
+            logging.FileHandler('bot_operations.log')
+        ]
     )
     return logging.getLogger()
 
 logger = setup_logging()
+
+# Khởi tạo Database Manager
+db_manager = DatabaseManager.get_instance()
 
 def escape_html(text):
     """Escape ký tự HTML để tránh lỗi hiển thị trên Telegram"""
@@ -70,266 +603,7 @@ def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, defa
     except Exception as e:
         logger.error(f"Lỗi kết nối Telegram: {str(e)}")
 
-# ========== HÀM TẠO BÀN PHÍM TELEGRAM ==========
-def create_main_menu():
-    """Tạo bàn phím menu chính cho Telegram"""
-    return {
-        "keyboard": [
-            [{"text": "📊 Danh sách Bot"}, {"text": "📊 Thống kê"}],
-            [{"text": "➕ Thêm Bot"}, {"text": "⛔ Dừng Bot"}],
-            [{"text": "⛔ Quản lý Coin"}, {"text": "📈 Vị thế"}],
-            [{"text": "💰 Số dư"}, {"text": "⚙️ Cấu hình"}],
-            [{"text": "🎯 Chiến lược"}]
-        ],
-        "resize_keyboard": True,
-        "one_time_keyboard": False
-    }
-
-def create_cancel_keyboard():
-    """Tạo bàn phím hủy bỏ"""
-    return {"keyboard": [[{"text": "❌ Hủy bỏ"}]], "resize_keyboard": True, "one_time_keyboard": True}
-
-def create_bot_count_keyboard():
-    """Tạo bàn phím chọn số lượng bot"""
-    return {
-        "keyboard": [[{"text": "1"}, {"text": "3"}, {"text": "5"}], [{"text": "10"}, {"text": "20"}], [{"text": "❌ Hủy bỏ"}]],
-        "resize_keyboard": True, "one_time_keyboard": True
-    }
-
-def create_bot_mode_keyboard():
-    """Tạo bàn phím chọn chế độ bot"""
-    return {
-        "keyboard": [
-            [{"text": "🤖 Bot Tĩnh - Coin cụ thể"}, {"text": "🔄 Bot Động - Tự tìm coin"}],
-            [{"text": "❌ Hủy bỏ"}]
-        ],
-        "resize_keyboard": True, "one_time_keyboard": True
-    }
-
-def create_symbols_keyboard():
-    """Tạo bàn phím chọn coin"""
-    try:
-        symbols = get_all_usdt_pairs(limit=12) or ["BNBUSDT", "ADAUSDT", "DOGEUSDT", "XRPUSDT", "DOTUSDT", "LINKUSDT", "SOLUSDT", "MATICUSDT"]
-    except:
-        symbols = ["BNBUSDT", "ADAUSDT", "DOGEUSDT", "XRPUSDT", "DOTUSDT", "LINKUSDT", "SOLUSDT", "MATICUSDT"]
-    
-    keyboard = []
-    row = []
-    for symbol in symbols:
-        row.append({"text": symbol})
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-    if row: keyboard.append(row)
-    keyboard.append([{"text": "❌ Hủy bỏ"}])
-    
-    return {"keyboard": keyboard, "resize_keyboard": True, "one_time_keyboard": True}
-
-def create_leverage_keyboard():
-    """Tạo bàn phím chọn đòn bẩy"""
-    leverages = ["3", "5", "10", "15", "20", "25", "50", "75", "100"]
-    keyboard = []
-    row = []
-    for lev in leverages:
-        row.append({"text": f"{lev}x"})
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-    if row: keyboard.append(row)
-    keyboard.append([{"text": "❌ Hủy bỏ"}])
-    return {"keyboard": keyboard, "resize_keyboard": True, "one_time_keyboard": True}
-
-def create_percent_keyboard():
-    """Tạo bàn phím chọn phần trăm vốn"""
-    return {
-        "keyboard": [
-            [{"text": "1"}, {"text": "3"}, {"text": "5"}, {"text": "10"}],
-            [{"text": "15"}, {"text": "20"}, {"text": "25"}, {"text": "50"}],
-            [{"text": "❌ Hủy bỏ"}]
-        ],
-        "resize_keyboard": True, "one_time_keyboard": True
-    }
-
-def create_tp_keyboard():
-    """Tạo bàn phím chọn Take Profit"""
-    return {
-        "keyboard": [
-            [{"text": "50"}, {"text": "100"}, {"text": "200"}],
-            [{"text": "300"}, {"text": "500"}, {"text": "1000"}],
-            [{"text": "❌ Hủy bỏ"}]
-        ],
-        "resize_keyboard": True, "one_time_keyboard": True
-    }
-
-def create_sl_keyboard():
-    """Tạo bàn phím chọn Stop Loss"""
-    return {
-        "keyboard": [
-            [{"text": "0"}, {"text": "50"}, {"text": "100"}],
-            [{"text": "150"}, {"text": "200"}, {"text": "500"}],
-            [{"text": "❌ Hủy bỏ"}]
-        ],
-        "resize_keyboard": True, "one_time_keyboard": True
-    }
-
-def create_roi_trigger_keyboard():
-    """Tạo bàn phím chọn ngưỡng ROI"""
-    return {
-        "keyboard": [
-            [{"text": "30"}, {"text": "50"}, {"text": "100"}],
-            [{"text": "150"}, {"text": "200"}, {"text": "300"}],
-            [{"text": "❌ Tắt tính năng"}],
-            [{"text": "❌ Hủy bỏ"}]
-        ],
-        "resize_keyboard": True, "one_time_keyboard": True
-    }
-
-def create_pyramiding_n_keyboard():
-    """Tạo bàn phím chọn số lần nhồi lệnh"""
-    return {
-        "keyboard": [
-            [{"text": "0"}, {"text": "1"}, {"text": "2"}, {"text": "3"}],
-            [{"text": "4"}, {"text": "5"}, {"text": "❌ Tắt tính năng"}],
-            [{"text": "❌ Hủy bỏ"}]
-        ],
-        "resize_keyboard": True, "one_time_keyboard": True
-    }
-
-def create_pyramiding_x_keyboard():
-    """Tạo bàn phím chọn mốc ROI nhồi lệnh"""
-    return {
-        "keyboard": [
-            [{"text": "100"}, {"text": "200"}, {"text": "300"}],
-            [{"text": "400"}, {"text": "500"}, {"text": "1000"}],
-            [{"text": "❌ Hủy bỏ"}]
-        ],
-        "resize_keyboard": True, "one_time_keyboard": True
-    }
-
-# ========== HÀM API BINANCE MỚI ==========
-def get_24hr_ticker(symbol=None):
-    """Lấy thông tin 24h của symbol (hoặc tất cả nếu không chỉ định)"""
-    try:
-        _wait_for_rate_limit()
-        url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-        if symbol:
-            url = f"{url}?symbol={symbol.upper()}"
-        
-        data = binance_api_request(url)
-        return data
-    except Exception as e:
-        logger.error(f"Lỗi lấy 24hr ticker: {str(e)}")
-        return None
-
-def get_top_volume_symbols(limit=20, min_volume_usd=100000):
-    """Lấy top coin theo khối lượng giao dịch thực tế"""
-    try:
-        all_tickers = get_24hr_ticker()
-        if not all_tickers:
-            return []
-        
-        volume_data = []
-        for ticker in all_tickers:
-            symbol = ticker.get('symbol', '')
-            if not symbol.endswith('USDT'):
-                continue
-            if symbol in _SYMBOL_BLACKLIST:
-                continue
-            
-            volume = float(ticker.get('volume', 0))
-            quote_volume = float(ticker.get('quoteVolume', 0))
-            
-            # Chỉ lấy coin có volume đô la đủ lớn
-            if quote_volume >= min_volume_usd:
-                volume_data.append({
-                    'symbol': symbol,
-                    'volume': volume,
-                    'quote_volume': quote_volume,
-                    'price_change_percent': float(ticker.get('priceChangePercent', 0))
-                })
-        
-        # Sắp xếp theo quote_volume (USD) giảm dần
-        volume_data.sort(key=lambda x: x['quote_volume'], reverse=True)
-        
-        # Lấy top limit
-        top_symbols = [item['symbol'] for item in volume_data[:limit]]
-        
-        logger.info(f"✅ Đã lấy {len(top_symbols)} coin volume cao nhất")
-        return top_symbols
-        
-    except Exception as e:
-        logger.error(f"❌ Lỗi lấy top volume: {str(e)}")
-        return []
-
-def get_high_volatility_symbols(limit=20, min_volatility_percent=5):
-    """Lấy top coin theo biến động giá thực tế"""
-    try:
-        all_tickers = get_24hr_ticker()
-        if not all_tickers:
-            return []
-        
-        volatility_data = []
-        for ticker in all_tickers:
-            symbol = ticker.get('symbol', '')
-            if not symbol.endswith('USDT'):
-                continue
-            if symbol in _SYMBOL_BLACKLIST:
-                continue
-            
-            high = float(ticker.get('highPrice', 0))
-            low = float(ticker.get('lowPrice', 0))
-            if low <= 0:
-                continue
-            
-            # Tính biến động phần trăm
-            volatility = ((high - low) / low) * 100
-            
-            if volatility >= min_volatility_percent:
-                volatility_data.append({
-                    'symbol': symbol,
-                    'volatility': volatility,
-                    'high': high,
-                    'low': low,
-                    'price_change_percent': float(ticker.get('priceChangePercent', 0))
-                })
-        
-        # Sắp xếp theo biến động giảm dần
-        volatility_data.sort(key=lambda x: x['volatility'], reverse=True)
-        
-        # Lấy top limit
-        top_symbols = [item['symbol'] for item in volatility_data[:limit]]
-        
-        logger.info(f"✅ Đã lấy {len(top_symbols)} coin biến động cao nhất")
-        return top_symbols
-        
-    except Exception as e:
-        logger.error(f"❌ Lỗi lấy top biến động: {str(e)}")
-        return []
-
-def get_symbol_metrics(symbol):
-    """Lấy các chỉ số chi tiết của một symbol"""
-    try:
-        ticker = get_24hr_ticker(symbol)
-        if not ticker or isinstance(ticker, list):
-            return None
-        
-        return {
-            'symbol': symbol,
-            'price': float(ticker.get('lastPrice', 0)),
-            'volume': float(ticker.get('volume', 0)),
-            'quote_volume': float(ticker.get('quoteVolume', 0)),
-            'price_change_percent': float(ticker.get('priceChangePercent', 0)),
-            'high': float(ticker.get('highPrice', 0)),
-            'low': float(ticker.get('lowPrice', 0)),
-            'bid_price': float(ticker.get('bidPrice', 0)),
-            'ask_price': float(ticker.get('askPrice', 0)),
-            'count': int(ticker.get('count', 0))
-        }
-    except Exception as e:
-        logger.error(f"Lỗi lấy metrics {symbol}: {str(e)}")
-        return None
-
-# ========== HÀM API BINANCE CŨ ==========
+# ========== HÀM API BINANCE ==========
 def _wait_for_rate_limit():
     """Đợi để tuân thủ rate limit của Binance API"""
     global _BINANCE_LAST_REQUEST_TIME
@@ -350,7 +624,7 @@ def sign(query, api_secret):
 
 def binance_api_request(url, method='GET', params=None, headers=None):
     """Gửi request tới Binance API với retry và error handling"""
-    max_retries = 2
+    max_retries = 3
     base_url = url
 
     for attempt in range(max_retries):
@@ -406,6 +680,128 @@ def binance_api_request(url, method='GET', params=None, headers=None):
     logger.error(f"Thất bại yêu cầu API sau {max_retries} lần thử")
     return None
 
+def get_24hr_ticker(symbol=None):
+    """Lấy thông tin 24h của symbol (hoặc tất cả nếu không chỉ định)"""
+    try:
+        _wait_for_rate_limit()
+        url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        if symbol:
+            url = f"{url}?symbol={symbol.upper()}"
+        
+        data = binance_api_request(url)
+        return data
+    except Exception as e:
+        logger.error(f"Lỗi lấy 24hr ticker: {str(e)}")
+        return None
+
+def get_top_volume_symbols(limit=20, min_volume_usd=100000):
+    """Lấy top coin theo khối lượng giao dịch thực tế"""
+    try:
+        all_tickers = get_24hr_ticker()
+        if not all_tickers:
+            return []
+        
+        volume_data = []
+        for ticker in all_tickers:
+            symbol = ticker.get('symbol', '')
+            if not symbol.endswith('USDT'):
+                continue
+            
+            # Kiểm tra blacklist từ database
+            blacklist_query = "SELECT symbol FROM coin_blacklist WHERE symbol = %s"
+            blacklisted = db_manager.execute_query(blacklist_query, (symbol,), return_result=True)
+            if blacklisted:
+                continue
+            
+            volume = float(ticker.get('volume', 0))
+            quote_volume = float(ticker.get('quoteVolume', 0))
+            
+            if quote_volume >= min_volume_usd:
+                volume_data.append({
+                    'symbol': symbol,
+                    'volume': volume,
+                    'quote_volume': quote_volume,
+                    'price_change_percent': float(ticker.get('priceChangePercent', 0))
+                })
+        
+        volume_data.sort(key=lambda x: x['quote_volume'], reverse=True)
+        top_symbols = [item['symbol'] for item in volume_data[:limit]]
+        
+        logger.info(f"✅ Đã lấy {len(top_symbols)} coin volume cao nhất")
+        return top_symbols
+        
+    except Exception as e:
+        logger.error(f"❌ Lỗi lấy top volume: {str(e)}")
+        return []
+
+def get_high_volatility_symbols(limit=20, min_volatility_percent=5):
+    """Lấy top coin theo biến động giá thực tế"""
+    try:
+        all_tickers = get_24hr_ticker()
+        if not all_tickers:
+            return []
+        
+        volatility_data = []
+        for ticker in all_tickers:
+            symbol = ticker.get('symbol', '')
+            if not symbol.endswith('USDT'):
+                continue
+            
+            # Kiểm tra blacklist
+            blacklist_query = "SELECT symbol FROM coin_blacklist WHERE symbol = %s"
+            blacklisted = db_manager.execute_query(blacklist_query, (symbol,), return_result=True)
+            if blacklisted:
+                continue
+            
+            high = float(ticker.get('highPrice', 0))
+            low = float(ticker.get('lowPrice', 0))
+            if low <= 0:
+                continue
+            
+            volatility = ((high - low) / low) * 100
+            
+            if volatility >= min_volatility_percent:
+                volatility_data.append({
+                    'symbol': symbol,
+                    'volatility': volatility,
+                    'high': high,
+                    'low': low,
+                    'price_change_percent': float(ticker.get('priceChangePercent', 0))
+                })
+        
+        volatility_data.sort(key=lambda x: x['volatility'], reverse=True)
+        top_symbols = [item['symbol'] for item in volatility_data[:limit]]
+        
+        logger.info(f"✅ Đã lấy {len(top_symbols)} coin biến động cao nhất")
+        return top_symbols
+        
+    except Exception as e:
+        logger.error(f"❌ Lỗi lấy top biến động: {str(e)}")
+        return []
+
+def get_symbol_metrics(symbol):
+    """Lấy các chỉ số chi tiết của một symbol"""
+    try:
+        ticker = get_24hr_ticker(symbol)
+        if not ticker or isinstance(ticker, list):
+            return None
+        
+        return {
+            'symbol': symbol,
+            'price': float(ticker.get('lastPrice', 0)),
+            'volume': float(ticker.get('volume', 0)),
+            'quote_volume': float(ticker.get('quoteVolume', 0)),
+            'price_change_percent': float(ticker.get('priceChangePercent', 0)),
+            'high': float(ticker.get('highPrice', 0)),
+            'low': float(ticker.get('lowPrice', 0)),
+            'bid_price': float(ticker.get('bidPrice', 0)),
+            'ask_price': float(ticker.get('askPrice', 0)),
+            'count': int(ticker.get('count', 0))
+        }
+    except Exception as e:
+        logger.error(f"Lỗi lấy metrics {symbol}: {str(e)}")
+        return None
+
 def get_all_usdt_pairs(limit=50):
     """Lấy danh sách tất cả cặp USDT đang giao dịch"""
     global _USDT_CACHE
@@ -421,13 +817,16 @@ def get_all_usdt_pairs(limit=50):
         usdt_pairs = []
         for symbol_info in data.get('symbols', []):
             symbol = symbol_info.get('symbol', '')
-            if (symbol.endswith('USDT') and symbol_info.get('status') == 'TRADING' 
-                and symbol not in _SYMBOL_BLACKLIST):
-                usdt_pairs.append(symbol)
+            if (symbol.endswith('USDT') and symbol_info.get('status') == 'TRADING'):
+                # Kiểm tra blacklist
+                blacklist_query = "SELECT symbol FROM coin_blacklist WHERE symbol = %s"
+                blacklisted = db_manager.execute_query(blacklist_query, (symbol,), return_result=True)
+                if not blacklisted:
+                    usdt_pairs.append(symbol)
 
         _USDT_CACHE["cặp"] = usdt_pairs
         _USDT_CACHE["cập_nhật_cuối"] = now
-        logger.info(f"✅ Đã lấy {len(usdt_pairs)} cặp USDT (loại trừ BTC/ETH)")
+        logger.info(f"✅ Đã lấy {len(usdt_pairs)} cặp USDT")
         return usdt_pairs[:limit]
 
     except Exception as e:
@@ -519,11 +918,7 @@ def get_balance(api_key, api_secret):
         return None
 
 def get_total_and_available_balance(api_key, api_secret):
-    """
-    Lấy TỔNG số dư (USDT + USDC) và số dư KHẢ DỤNG tương ứng.
-    total_all   = tổng walletBalance (USDT+USDC)
-    avail_all   = tổng availableBalance (USDT+USDC)
-    """
+    """Lấy TỔNG số dư (USDT + USDC) và số dư KHẢ DỤNG"""
     try:
         ts = int(time.time() * 1000)
         params = {"timestamp": ts}
@@ -545,22 +940,14 @@ def get_total_and_available_balance(api_key, api_secret):
                 available_all += float(asset["availableBalance"])
                 total_all += float(asset["walletBalance"])
 
-        logger.info(
-            f"💰 Tổng số dư (USDT+USDC): {total_all:.2f}, "
-            f"Khả dụng: {available_all:.2f}"
-        )
+        logger.info(f"💰 Tổng số dư (USDT+USDC): {total_all:.2f}, Khả dụng: {available_all:.2f}")
         return total_all, available_all
     except Exception as e:
         logger.error(f"Lỗi lấy tổng số dư: {str(e)}")
         return None, None
 
 def get_margin_safety_info(api_key, api_secret):
-    """
-    Lấy thông tin an toàn ký quỹ:
-      - margin_balance = totalMarginBalance (tổng số dư ký quỹ, gồm PnL)
-      - maint_margin   = totalMaintMargin (tổng mức duy trì ký quỹ)
-      - ratio          = margin_balance / maint_margin  (nếu maint_margin > 0)
-    """
+    """Lấy thông tin an toàn ký quỹ"""
     try:
         ts = int(time.time() * 1000)
         params = {"timestamp": ts}
@@ -578,17 +965,12 @@ def get_margin_safety_info(api_key, api_secret):
         maint_margin = float(data.get("totalMaintMargin", 0.0))
 
         if maint_margin <= 0:
-            logger.warning(
-                f"⚠️ Maint margin <= 0 (margin_balance={margin_balance:.4f}, maint_margin={maint_margin:.4f})"
-            )
+            logger.warning(f"⚠️ Maint margin <= 0 (margin_balance={margin_balance:.4f}, maint_margin={maint_margin:.4f})")
             return margin_balance, maint_margin, None
 
         ratio = margin_balance / maint_margin
 
-        logger.info(
-            f"🛡️ An toàn ký quỹ: margin_balance={margin_balance:.4f}, "
-            f"maint_margin={maint_margin:.4f}, tỷ lệ={ratio:.2f}x"
-        )
+        logger.info(f"🛡️ An toàn ký quỹ: margin_balance={margin_balance:.4f}, maint_margin={maint_margin:.4f}, tỷ lệ={ratio:.2f}x")
         return margin_balance, maint_margin, ratio
 
     except Exception as e:
@@ -670,40 +1052,103 @@ def get_positions(symbol=None, api_key=None, api_secret=None):
         logger.error(f"Lỗi vị thế: {str(e)}")
         return []
 
-# ========== LỚP QUẢN LÝ CỐT LÕI ==========
+# ========== LỚP QUẢN LÝ CỐT LÕI VỚI DATABASE ==========
 class CoinManager:
-    """Quản lý danh sách coin đang được các bot sử dụng"""
+    """Quản lý danh sách coin đang được các bot sử dụng với database"""
     def __init__(self):
         self.active_coins = set()
         self._lock = threading.Lock()
     
-    def register_coin(self, symbol):
+    def register_coin(self, symbol, bot_id=None):
         """Đăng ký coin đang được sử dụng"""
         if not symbol: return
-        with self._lock: self.active_coins.add(symbol.upper())
+        symbol = symbol.upper()
+        with self._lock: 
+            self.active_coins.add(symbol)
+            
+        # Lưu vào database nếu có bot_id
+        if bot_id:
+            try:
+                # Kiểm tra xem đã có trong database chưa
+                check_query = "SELECT id FROM bot_positions WHERE bot_id = %s AND symbol = %s"
+                existing = db_manager.execute_query(check_query, (bot_id, symbol), return_result=True)
+                
+                if not existing:
+                    # Tạo bản ghi tạm thời
+                    db_manager.save_position({
+                        'bot_id': bot_id,
+                        'symbol': symbol,
+                        'side': 'PENDING',
+                        'entry_price': 0,
+                        'quantity': 0,
+                        'status': 'pending'
+                    })
+            except Exception as e:
+                logger.error(f"Lỗi đăng ký coin vào database: {str(e)}")
     
-    def unregister_coin(self, symbol):
+    def unregister_coin(self, symbol, bot_id=None):
         """Hủy đăng ký coin"""
         if not symbol: return
-        with self._lock: self.active_coins.discard(symbol.upper())
+        symbol = symbol.upper()
+        with self._lock: 
+            self.active_coins.discard(symbol)
+        
+        # Xóa khỏi database nếu có bot_id
+        if bot_id:
+            try:
+                query = "DELETE FROM bot_positions WHERE bot_id = %s AND symbol = %s AND status = 'pending'"
+                db_manager.execute_query(query, (bot_id, symbol))
+            except Exception as e:
+                logger.error(f"Lỗi hủy đăng ký coin từ database: {str(e)}")
     
     def is_coin_active(self, symbol):
         """Kiểm tra coin có đang được sử dụng không"""
         if not symbol: return False
-        with self._lock: return symbol.upper() in self.active_coins
+        symbol = symbol.upper()
+        with self._lock: 
+            return symbol in self.active_coins
     
     def get_active_coins(self):
         """Lấy danh sách coin đang hoạt động"""
-        with self._lock: return list(self.active_coins)
+        with self._lock: 
+            return list(self.active_coins)
+    
+    def get_active_coins_from_db(self):
+        """Lấy danh sách coin đang hoạt động từ database"""
+        try:
+            query = "SELECT DISTINCT symbol FROM bot_positions WHERE status IN ('open', 'pending')"
+            result = db_manager.execute_query(query, return_result=True)
+            return [row[0] for row in result] if result else []
+        except Exception as e:
+            logger.error(f"Lỗi lấy active coins từ database: {str(e)}")
+            return []
 
 class BotExecutionCoordinator:
-    """Điều phối quyền tìm coin giữa các bot theo cơ chế FIFO"""
+    """Điều phối quyền tìm coin giữa các bot với database"""
     def __init__(self):
         self._lock = threading.Lock()
         self._bot_queue = queue.Queue()
         self._current_finding_bot = None
         self._found_coins = set()
         self._bots_with_coins = set()
+        
+        # Khôi phục trạng thái từ database
+        self._restore_state()
+    
+    def _restore_state(self):
+        """Khôi phục trạng thái từ database khi khởi động lại"""
+        try:
+            # Lấy các bot có vị thế đang mở
+            query = "SELECT DISTINCT bot_id FROM bot_positions WHERE status = 'open'"
+            result = db_manager.execute_query(query, return_result=True)
+            
+            if result:
+                for row in result:
+                    self._bots_with_coins.add(row[0])
+                
+                logger.info(f"✅ Đã khôi phục {len(self._bots_with_coins)} bot có vị thế từ database")
+        except Exception as e:
+            logger.error(f"Lỗi khôi phục trạng thái coordinator: {str(e)}")
     
     def request_coin_search(self, bot_id):
         """Yêu cầu quyền tìm coin"""
@@ -711,12 +1156,10 @@ class BotExecutionCoordinator:
             if bot_id in self._bots_with_coins:
                 return False
                 
-            # ✅ SỬA: Cho phép bot đang được chỉ định (_current_finding_bot) được quyền scan
             if self._current_finding_bot is None or self._current_finding_bot == bot_id:
                 self._current_finding_bot = bot_id
                 return True
             else:
-                # Chỉ xếp hàng nếu chưa ở trong queue
                 if bot_id not in list(self._bot_queue.queue):
                     self._bot_queue.put(bot_id)
                 return False
@@ -756,10 +1199,9 @@ class BotExecutionCoordinator:
         with self._lock: return symbol not in self._found_coins
 
     def bot_processing_coin(self, bot_id):
-        """Đánh dấu bot đang xử lý coin (chưa vào lệnh)"""
+        """Đánh dấu bot đang xử lý coin"""
         with self._lock:
             self._bots_with_coins.add(bot_id)
-            # Xóa bot khỏi queue nếu có
             new_queue = queue.Queue()
             while not self._bot_queue.empty():
                 bot_in_queue = self._bot_queue.get()
@@ -787,7 +1229,7 @@ class BotExecutionCoordinator:
                 return queue_list.index(bot_id) + 1 if bot_id in queue_list else -1
 
 class SmartCoinFinder:
-    """Phân tích thị trường và tìm coin phù hợp - SỬA ĐỔI ĐỂ DÙNG DỮ LIỆU THỰC"""
+    """Phân tích thị trường và tìm coin phù hợp với database"""
     def __init__(self, api_key, api_secret):
         self.api_key = api_key
         self.api_secret = api_secret
@@ -884,13 +1326,22 @@ class SmartCoinFinder:
         return self.get_rsi_signal(symbol, volume_threshold=100)
     
     def has_existing_position(self, symbol):
-        """Kiểm tra có vị thế tồn tại trên symbol không"""
+        """Kiểm tra có vị thế tồn tại trên symbol không (từ database)"""
         try:
+            # Kiểm tra trong database trước
+            query = "SELECT id FROM bot_positions WHERE symbol = %s AND status = 'open'"
+            result = db_manager.execute_query(query, (symbol,), return_result=True)
+            
+            if result and len(result) > 0:
+                logger.info(f"⚠️ Đã phát hiện vị thế trên {symbol} trong database")
+                return True
+            
+            # Kiểm tra trên Binance
             positions = get_positions(symbol, self.api_key, self.api_secret)
             if positions:
                 for pos in positions:
                     if abs(float(pos.get('positionAmt', 0))) > 0:
-                        logger.info(f"⚠️ Đã phát hiện vị thế trên {symbol}")
+                        logger.info(f"⚠️ Đã phát hiện vị thế trên {symbol} từ Binance")
                         return True
             return False
         except Exception as e:
@@ -910,7 +1361,7 @@ class SmartCoinFinder:
         return get_symbol_metrics(symbol)
 
     def find_best_coin_by_volume(self, excluded_coins=None, required_leverage=10):
-        """Tìm coin tốt nhất theo khối lượng"""
+        """Tìm coin tốt nhất theo khối lượng với database"""
         try:
             now = time.time()
             if now - self.last_scan_time < self.scan_cooldown: return None
@@ -929,7 +1380,7 @@ class SmartCoinFinder:
                 if max_lev < required_leverage: continue
 
                 # Lấy tín hiệu thực tế
-                time.sleep(0.5)  # Tránh rate limit
+                time.sleep(0.5)
                 entry_signal = self.get_entry_signal(symbol)
                 if entry_signal in ["BUY", "SELL"]:
                     valid_symbols.append((symbol, entry_signal))
@@ -947,7 +1398,7 @@ class SmartCoinFinder:
             return None
 
     def find_best_coin_by_volatility(self, excluded_coins=None, required_leverage=10):
-        """Tìm coin tốt nhất theo biến động"""
+        """Tìm coin tốt nhất theo biến động với database"""
         try:
             now = time.time()
             if now - self.last_scan_time < self.scan_cooldown: return None
@@ -984,7 +1435,7 @@ class SmartCoinFinder:
             return None
 
 class WebSocketManager:
-    """Quản lý kết nối WebSocket thời gian thực"""
+    """Quản lý kết nối WebSocket thời gian thực với database"""
     def __init__(self):
         self.connections = {}
         self.executor = ThreadPoolExecutor(max_workers=20)
@@ -1022,9 +1473,25 @@ class WebSocketManager:
                     
                     self.last_price_update[symbol] = current_time
                     self.price_cache[symbol] = price
+                    
+                    # Cập nhật giá vào database cho các vị thế đang mở
+                    self._update_price_in_database(symbol, price)
+                    
                     self.executor.submit(callback, price)
             except Exception as e:
                 logger.error(f"Lỗi tin nhắn WebSocket {symbol}: {str(e)}")
+        
+        def _update_price_in_database(self, symbol, price):
+            """Cập nhật giá hiện tại vào database"""
+            try:
+                query = """
+                UPDATE bot_positions 
+                SET current_price = %s, last_update = CURRENT_TIMESTAMP
+                WHERE symbol = %s AND status = 'open'
+                """
+                db_manager.execute_query(query, (price, symbol))
+            except Exception as e:
+                logger.error(f"Lỗi cập nhật giá {symbol} vào database: {str(e)}")
                 
         def on_error(ws, error):
             logger.error(f"Lỗi WebSocket {symbol}: {str(error)}")
@@ -1069,5 +1536,19 @@ class WebSocketManager:
             self.remove_symbol(symbol)
 
 # Bypass SSL verification
-
 ssl._create_default_https_context = ssl._create_unverified_context
+
+# Hàm cleanup tự động
+def auto_cleanup_database():
+    """Tự động dọn dẹp database định kỳ"""
+    while True:
+        try:
+            # Chạy mỗi 6 giờ
+            time.sleep(6 * 3600)
+            db_manager.cleanup_old_data(days=30)
+        except Exception as e:
+            logger.error(f"Lỗi auto cleanup: {str(e)}")
+
+# Khởi chạy thread cleanup
+cleanup_thread = threading.Thread(target=auto_cleanup_database, daemon=True)
+cleanup_thread.start()
