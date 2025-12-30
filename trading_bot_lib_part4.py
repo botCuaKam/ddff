@@ -41,7 +41,7 @@ def initialize_bot_manager():
     
     try:
         api_key = os.getenv('BINANCE_API_KEY')
-        api_secret = os.getenv('BINANCE_API_SECRET')
+        api_secret = os.getenv('BINANCE_SECRET_KEY')
         telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         
