@@ -1,5 +1,16 @@
-numpy==1.26.4
-pandas
-requests==2.31.0
-websocket-client==1.8.0
-python-telegram-bot==20.3 
+# ===== CORE =====
+requests>=2.31.0
+numpy>=1.26.0
+
+# ===== WEBSOCKET =====
+websocket-client>=1.7.0
+
+# ===== DATABASE (PostgreSQL) =====
+psycopg2-binary>=2.9.9
+
+# ===== WEB API (React dùng) =====
+fastapi>=0.110.0
+uvicorn>=0.27.1
+
+# ===== UTILS =====
+python-dotenv>=1.0.1
