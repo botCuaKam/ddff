@@ -27,9 +27,9 @@ class BaseBot:
                  dynamic_strategy="volume", reverse_on_stop=False, static_entry_mode="signal"):
         
         self.bot_type = bot_type
-        self.dynamic_strategy = dynamic_strategy  # "volume" hoặc "volatility"
+        self.dynamic_strategy = dynamic_strategy
         self.reverse_on_stop = reverse_on_stop
-        self.static_entry_mode = static_entry_mode  # "signal", "reverse", "wait"
+        self.static_entry_mode = static_entry_mode
         
         self.max_coins = 1
         self.active_symbols = []
@@ -50,7 +50,6 @@ class BaseBot:
         self.config_key = config_key
         self.bot_id = bot_id or f"{bot_type}_{dynamic_strategy}_{int(time.time())}_{random.randint(1000, 9999)}"
 
-        # Thông tin nhồi lệnh
         self.pyramiding_n = int(pyramiding_n) if pyramiding_n else 0
         self.pyramiding_x = float(pyramiding_x) if pyramiding_x else 0
         self.pyramiding_enabled = self.pyramiding_n > 0 and self.pyramiding_x > 0
@@ -78,7 +77,6 @@ class BaseBot:
         self.margin_safety_interval = 10
         self.last_margin_safety_check = 0
 
-        # Ngưỡng cân bằng
         self.volume_imbalance_threshold = 0.1
 
         self.coin_manager = coin_manager or CoinManager()
@@ -94,10 +92,7 @@ class BaseBot:
 
         self.bot_coordinator = bot_coordinator or BotExecutionCoordinator()
 
-        # Lưu cấu hình bot vào database
         self._save_bot_config_to_db()
-        
-        # Khôi phục vị thế từ database khi khởi động
         self._restore_positions_from_db()
 
         if symbol and not self.coin_finder.has_existing_position(symbol):
@@ -106,7 +101,6 @@ class BaseBot:
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
-        # Log khởi động
         roi_info = f" | 🎯 ROI Kích hoạt: {roi_trigger}%" if roi_trigger else " | 🎯 ROI Kích hoạt: Tắt"
         pyramiding_info = f" | 🔄 Nhồi lệnh: {pyramiding_n} lần tại {pyramiding_x}%" if self.pyramiding_enabled else " | 🔄 Nhồi lệnh: Tắt"
         strategy_info = f" | 📊 Chiến lược: {dynamic_strategy}" if dynamic_strategy else ""
@@ -156,7 +150,6 @@ class BaseBot:
                 if symbol not in self.active_symbols:
                     self._add_symbol(symbol)
                 
-                # Cập nhật thông tin vị thế từ database
                 self.symbol_data[symbol] = {
                     'status': 'open',
                     'side': pos['side'],
@@ -227,7 +220,6 @@ class BaseBot:
         }
         
         if db_manager.save_trade_history(trade_data):
-            # Cập nhật thống kê
             if pnl is not None:
                 is_win = pnl > 0
                 db_manager.update_statistics(self.bot_id, pnl, is_win)
@@ -242,7 +234,6 @@ class BaseBot:
             
             symbol_info = self.symbol_data[symbol]
             
-            # Tính ROI hiện tại
             current_price = self.get_current_price(symbol)
             if current_price > 0:
                 if symbol_info['side'] == "BUY":
@@ -286,29 +277,24 @@ class BaseBot:
             try:
                 current_time = time.time()
 
-                # KIỂM TRA AN TOÀN KÝ QUỸ
                 if current_time - self.last_margin_safety_check > self.margin_safety_interval:
                     self.last_margin_safety_check = current_time
                     if self._check_margin_safety():
                         time.sleep(5)
                         continue
                 
-                # KIỂM TRA VỊ THẾ TOÀN TÀI KHOẢN
                 if current_time - self.last_global_position_check > 30:
                     self.check_global_positions()
                     self.last_global_position_check = current_time
                 
-                # NẾU BOT KHÔNG CÓ COIN NÀO - YÊU CẦU TÌM COIN
                 if not self.active_symbols:
                     if self.symbol:
-                        # Bot tĩnh có symbol cố định
                         if self.symbol not in self.active_symbols:
                             if not self.coin_finder.has_existing_position(self.symbol):
                                 self._add_symbol(self.symbol)
                         time.sleep(5)
                         continue
                     
-                    # BOT ĐỘNG: YÊU CẦU TÌM COIN
                     search_permission = self.bot_coordinator.request_coin_search(self.bot_id)
                     
                     if search_permission:
@@ -331,7 +317,6 @@ class BaseBot:
                             self.log(f"⏳ Đang chờ tìm coin (vị trí: {queue_pos}/{queue_info['queue_size'] + 1}) - Bot đang tìm: {current_finder}")
                         time.sleep(2)
                 
-                # XỬ LÝ COIN HIỆN TẠI VÀ CẬP NHẬT DATABASE
                 for symbol in self.active_symbols.copy():
                     position_opened = self._process_single_symbol(symbol)
                     
@@ -356,17 +341,13 @@ class BaseBot:
             symbol_info = self.symbol_data[symbol]
             current_time = time.time()
             
-            # Kiểm tra vị thế định kỳ và cập nhật database
             if current_time - symbol_info.get('last_position_check', 0) > 30:
                 self._check_symbol_position(symbol)
                 symbol_info['last_position_check'] = current_time
                 
-                # Cập nhật thông tin vị thế vào database
                 self._update_position_in_db(symbol, {})
             
-            # Xử lý theo trạng thái
             if symbol_info['position_open']:
-                # BOT TĨNH
                 if self.symbol:
                     self._check_symbol_tp_sl(symbol)
                     
@@ -375,7 +356,6 @@ class BaseBot:
                     
                     return False
                 
-                # BOT ĐỘNG
                 exit_triggered = False
                 
                 if self.dynamic_strategy == "volume":
@@ -393,15 +373,12 @@ class BaseBot:
                     
                 return False
             else:
-                # Tìm cơ hội vào lệnh
                 if (current_time - symbol_info['last_trade_time'] > 30 and 
                     current_time - symbol_info['last_close_time'] > 30):
                     
-                    # BOT TĨNH
                     if self.symbol:
                         return self._process_static_entry(symbol)
                     
-                    # BOT ĐỘNG
                     return self._process_dynamic_entry(symbol)
                 
                 return False
@@ -423,7 +400,7 @@ class BaseBot:
             elif self.static_entry_mode == "reverse":
                 self.check_global_positions()
                 target_side = self._get_reverse_side()
-            else:  # "wait"
+            else:
                 target_side = entry_signal
             
             if target_side in ["BUY", "SELL"]:
@@ -657,7 +634,6 @@ class BaseBot:
     def _check_symbol_position(self, symbol):
         """Kiểm tra và cập nhật thông tin vị thế"""
         try:
-            # Kiểm tra trong database trước
             db_positions = db_manager.get_open_positions(self.bot_id)
             position_found_in_db = False
             
@@ -693,7 +669,6 @@ class BaseBot:
                         break
             
             if not position_found_in_db:
-                # Kiểm tra trên Binance
                 positions = get_positions(symbol, self.api_key, self.api_secret)
                 if not positions:
                     self._reset_symbol_position(symbol)
@@ -709,7 +684,6 @@ class BaseBot:
                             self.symbol_data[symbol]['qty'] = position_amt
                             self.symbol_data[symbol]['entry'] = float(pos.get('entryPrice', 0))
                             
-                            # Lưu vào database
                             self._save_position_to_db(symbol, "open")
                             
                             if self.pyramiding_enabled:
@@ -838,10 +812,8 @@ class BaseBot:
 
                     self.bot_coordinator.bot_has_coin(self.bot_id)
                     
-                    # Lưu vào database
                     self._save_position_to_db(symbol, "open")
                     
-                    # Lưu lịch sử giao dịch
                     self._save_trade_history(
                         symbol, 
                         f"OPEN_{side}", 
@@ -937,7 +909,6 @@ class BaseBot:
                 info['pyramiding_base_roi'] = roi
                 info['last_pyramiding_time'] = current_time
                 
-                # Cập nhật database
                 self._update_position_in_db(symbol, {'pyramiding_count': new_count})
 
                 self.log(f"🔄 {symbol} - ĐÃ NHỒI LẦN {new_count}/{self.pyramiding_n} tại ROI {roi:.2f}%")
@@ -1008,10 +979,8 @@ class BaseBot:
                     symbol_info['qty'] = new_qty
                     symbol_info['entry'] = new_entry
                     
-                    # Cập nhật database
                     self._update_position_in_db(symbol, {})
                     
-                    # Lưu lịch sử giao dịch
                     self._save_trade_history(
                         symbol,
                         f"PYRAMID_{side}",
@@ -1077,10 +1046,8 @@ class BaseBot:
                     if invested > 0:
                         roi = (pnl / invested) * 100
                 
-                # Cập nhật database
                 db_manager.close_position(self.bot_id, symbol, pnl, roi)
                 
-                # Lưu lịch sử giao dịch
                 self._save_trade_history(
                     symbol,
                     f"CLOSE_{close_side}",
@@ -1297,7 +1264,6 @@ class BaseBot:
         self.ws_manager.remove_symbol(symbol)
         self.coin_manager.unregister_coin(symbol, self.bot_id)
         
-        # Xóa khỏi database
         try:
             query = "DELETE FROM bot_positions WHERE bot_id = %s AND symbol = %s"
             db_manager.execute_query(query, (self.bot_id, symbol))
@@ -1329,7 +1295,6 @@ class BaseBot:
         """Dừng bot hoàn toàn và cập nhật database"""
         self._stop = True
         
-        # Cập nhật trạng thái bot trong database
         db_manager.update_bot_status(self.bot_id, "stopped")
         
         stopped_count = self.stop_all_symbols()
@@ -1352,7 +1317,7 @@ class BalanceProtectionBot(BaseBot):
     def __init__(self, symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
                  api_key, api_secret, telegram_bot_token, telegram_chat_id, bot_id=None, **kwargs):
         
-        kwargs.pop("dynamic_strategy", None)  # tránh truyền trùng
+        kwargs.pop("dynamic_strategy", None)
 
         super().__init__(symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
                          api_key, api_secret, telegram_bot_token, telegram_chat_id,
@@ -1365,7 +1330,7 @@ class CompoundProfitBot(BaseBot):
     def __init__(self, symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
                  api_key, api_secret, telegram_bot_token, telegram_chat_id, bot_id=None, **kwargs):
         
-        kwargs.pop("dynamic_strategy", None)  # tránh truyền trùng
+        kwargs.pop("dynamic_strategy", None)
 
         super().__init__(symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
                          api_key, api_secret, telegram_bot_token, telegram_chat_id,
