@@ -1352,6 +1352,8 @@ class BalanceProtectionBot(BaseBot):
     def __init__(self, symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
                  api_key, api_secret, telegram_bot_token, telegram_chat_id, bot_id=None, **kwargs):
         
+        kwargs.pop("dynamic_strategy", None)  # tránh truyền trùng
+
         super().__init__(symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
                          api_key, api_secret, telegram_bot_token, telegram_chat_id,
                          "Bot-Biến-Động", bot_id=bot_id, 
@@ -1363,6 +1365,8 @@ class CompoundProfitBot(BaseBot):
     def __init__(self, symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
                  api_key, api_secret, telegram_bot_token, telegram_chat_id, bot_id=None, **kwargs):
         
+        kwargs.pop("dynamic_strategy", None)  # tránh truyền trùng
+
         super().__init__(symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
                          api_key, api_secret, telegram_bot_token, telegram_chat_id,
                          "Bot-Khối-Lượng", bot_id=bot_id, 
