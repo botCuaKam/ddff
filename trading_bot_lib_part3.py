@@ -1469,7 +1469,7 @@ def run_bot_manager():
     """Chạy ứng dụng BotManager với cấu hình từ biến môi trường"""
     
     api_key = os.getenv('BINANCE_API_KEY')
-    api_secret = os.getenv('BINANCE_API_SECRET')
+    api_secret = os.getenv('BINANCE_SECRET_KEY')
     telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
     
@@ -1477,7 +1477,7 @@ def run_bot_manager():
         logger.error("❌ Thiếu cấu hình Binance API Key/Secret")
         logger.info("ℹ️ Thiết lập biến môi trường:")
         logger.info("  - BINANCE_API_KEY: Your Binance API Key")
-        logger.info("  - BINANCE_API_SECRET: Your Binance API Secret")
+        logger.info("  - BINANCE_SECRET_KEY: Your Binance API Secret")
         logger.info("  - TELEGRAM_BOT_TOKEN: Your Telegram Bot Token")
         logger.info("  - TELEGRAM_CHAT_ID: Your Telegram Chat ID")
         logger.info("  - DATABASE_URL: PostgreSQL connection URL (từ Railway)")
@@ -1508,3 +1508,4 @@ if __name__ == "__main__":
             logger.info("🛑 Đang dừng hệ thống...")
             bot_manager.stop_all()
             logger.info("🔴 Hệ thống đã dừng")
+
