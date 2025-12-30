@@ -3,6 +3,10 @@ from trading_bot_lib_part3 import BotManager
 import os
 import json
 import time
+from trading_bot_lib_part4 import start_web_in_thread
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # Lấy cấu hình từ biến môi trường
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
@@ -54,11 +58,11 @@ def main():
         print("⚠️ Không tìm thấy cấu hình bot! Vui lòng thiết lập biến môi trường BOT_CONFIGS.")
     
     try:
+        start_web_in_thread(manager=manager)
         print("🟢 Hệ thống đã sẵn sàng. Đang chạy...")
         # Giữ chương trình chạy
-        while manager.running:
-            time.sleep(1)
-            
+        while True:
+            time.sleep(60)
     except KeyboardInterrupt:
         print("\n👋 Nhận tín hiệu dừng từ người dùng...")
         manager.log("👋 Nhận tín hiệu dừng từ người dùng...")
@@ -70,7 +74,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
 
