@@ -19,15 +19,15 @@ def _mask(value: str) -> str:
 
 
 def print_env_status():
-    # Lưu ý: part3/part4 dùng BINANCE_API_SECRET (không phải BINANCE_SECRET_KEY)
+    # Lưu ý: part3/part4 dùng BINANCE_SECRET_KEY (không phải BINANCE_SECRET_KEY)
     api_key = os.getenv("BINANCE_API_KEY", "")
-    api_secret = os.getenv("BINANCE_API_SECRET", "")
+    api_secret = os.getenv("BINANCE_SECRET_KEY", "")
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     tg_chat = os.getenv("TELEGRAM_CHAT_ID", "")
     db_url = os.getenv("DATABASE_URL", "")
 
     print(f"BINANCE_API_KEY: {_mask(api_key)}")
-    print(f"BINANCE_API_SECRET: {_mask(api_secret)}")
+    print(f"BINANCE_SECRET_KEY: {_mask(api_secret)}")
     print(f"TELEGRAM_BOT_TOKEN: {_mask(tg_token)}")
     print(f"TELEGRAM_CHAT_ID: {tg_chat if tg_chat else 'Không có'}")
     print(f"DATABASE_URL: {_mask(db_url)}")
@@ -185,3 +185,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
