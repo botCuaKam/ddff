@@ -56,7 +56,6 @@ def create_bot_mode_keyboard():
 def create_symbols_keyboard(limit=12):
     """Tạo bàn phím chọn coin từ database"""
     try:
-        # Lấy danh sách coin từ database hoặc API
         symbols = get_all_usdt_pairs(limit=limit) or ["BNBUSDT", "ADAUSDT", "DOGEUSDT", "XRPUSDT", "DOTUSDT", "LINKUSDT", "SOLUSDT", "MATICUSDT"]
     except:
         symbols = ["BNBUSDT", "ADAUSDT", "DOGEUSDT", "XRPUSDT", "DOTUSDT", "LINKUSDT", "SOLUSDT", "MATICUSDT"]
@@ -174,7 +173,6 @@ class BotManager:
         self.coin_manager = CoinManager()
         self.symbol_locks = defaultdict(threading.Lock)
 
-        # Khôi phục bot từ database khi khởi động
         self._restore_bots_from_db()
 
         if api_key and api_secret:
@@ -200,11 +198,9 @@ class BotManager:
                 try:
                     bot_id = bot_config['bot_id']
                     
-                    # Kiểm tra xem bot đã được khởi tạo chưa
                     if bot_id in self.bots:
                         continue
                     
-                    # Tạo bot từ cấu hình database
                     bot_mode = bot_config['bot_mode']
                     
                     if bot_mode == 'static':
@@ -217,7 +213,6 @@ class BotManager:
                             bot_class = BalanceProtectionBot
                         symbol = None
                     
-                    # Tạo bot
                     bot = bot_class(
                         symbol=symbol,
                         lev=bot_config['leverage'],
@@ -272,38 +267,33 @@ class BotManager:
     def get_position_summary(self):
         """Lấy tổng hợp thống kê chi tiết từ database"""
         try:
-            # Lấy thông tin từ database
             all_bots = db_manager.get_all_bots()
             open_positions = db_manager.get_open_positions()
             statistics = db_manager.get_statistics()
             
             summary = "📊 **THỐNG KÊ CHI TIẾT**\n\n"
             
-            # Số dư
             balance = get_balance(self.api_key, self.api_secret)
             if balance is not None:
                 summary += f"💰 **SỐ DƯ**: {balance:.2f} USDT\n"
             else:
                 summary += f"💰 **SỐ DƯ**: ❌ Lỗi kết nối\n"
             
-            # Thống kê từ database
             if statistics:
                 summary += f"📈 **Tổng PnL**: {statistics.get('total_pnl', 0):.2f} USDT\n"
                 summary += f"🎯 **Tổng giao dịch**: {statistics.get('total_trades', 0)}\n"
                 summary += f"✅ **Thắng**: {statistics.get('winning_trades', 0)} | ❌ **Thua**: {statistics.get('losing_trades', 0)}\n\n"
             
-            # Thông tin bot
             static_bots = [b for b in all_bots if b['bot_mode'] == 'static']
             dynamic_bots = [b for b in all_bots if b['bot_mode'] == 'dynamic']
             
             summary += f"🤖 **TỔNG SỐ BOT**: {len(all_bots)} bot\n"
             summary += f"🔧 **PHÂN LOẠI**: Tĩnh: {len(static_bots)} | Động: {len(dynamic_bots)}\n\n"
             
-            # Vị thế đang mở
             if open_positions:
                 summary += f"📈 **VỊ THẾ ĐANG MỞ**: {len(open_positions)}\n"
                 
-                for pos in open_positions[:5]:  # Hiển thị 5 vị thế đầu
+                for pos in open_positions[:5]:
                     symbol = pos['symbol']
                     side = pos['side']
                     entry = pos['entry_price']
@@ -318,23 +308,20 @@ class BotManager:
             else:
                 summary += "📭 **Không có vị thế đang mở**\n\n"
             
-            # Hàng đợi
             queue_info = self.bot_coordinator.get_queue_info()
             summary += f"🎪 **THÔNG TIN HÀNG ĐỢI (FIFO)**\n"
             summary += f"• Bot đang tìm coin: {queue_info['current_finding'] or 'Không có'}\n"
             summary += f"• Bot trong hàng đợi: {queue_info['queue_size']}\n"
             summary += f"• Bot có coin: {len(queue_info['bots_with_coins'])}\n\n"
             
-            # Chi tiết bot
             if all_bots:
                 summary += "📋 **CHI TIẾT BOT**:\n"
                 
-                for bot in all_bots[:10]:  # Hiển thị 10 bot đầu
+                for bot in all_bots[:10]:
                     bot_id = bot['bot_id']
                     mode = "🤖" if bot['bot_mode'] == 'static' else "🔄"
                     status = "🟢" if bot['status'] == 'running' else "🔴"
                     
-                    # Đếm vị thế đang mở
                     bot_positions = [p for p in open_positions if p['bot_id'] == bot_id]
                     
                     summary += f"{status} {mode} **{bot_id}**\n"
@@ -343,7 +330,7 @@ class BotManager:
                     summary += f"   📈 Vị thế: {len(bot_positions)} coin\n"
                     
                     if bot_positions:
-                        for pos in bot_positions[:2]:  # Hiển thị 2 coin đầu
+                        for pos in bot_positions[:2]:
                             summary += f"   🔗 {pos['symbol']} | {pos['side']} | ROI: {pos.get('roi', 0):.2f}%\n"
                     
                     summary += "\n"
@@ -469,7 +456,6 @@ class BotManager:
             self.log("❌ KHÔNG THỂ KẾT NỐI VỚI BINANCE - KHÔNG THỂ TẠO BOT")
             return False
         
-        # Lấy các tham số mới
         static_entry_mode = kwargs.get('static_entry_mode', 'signal')
         dynamic_strategy = kwargs.get('dynamic_strategy', 'volume')
         pyramiding_n = kwargs.get('pyramiding_n', 0)
@@ -480,7 +466,6 @@ class BotManager:
         
         try:
             for i in range(bot_count):
-                # Tạo bot ID
                 if bot_mode == 'static' and symbol:
                     bot_id = f"STATIC_{symbol}_{int(time.time())}_{i}"
                 else:
@@ -488,7 +473,6 @@ class BotManager:
                 
                 if bot_id in self.bots: continue
                 
-                # CHỌN LỚP BOT THEO CHIẾN LƯỢC
                 if bot_mode == 'static':
                     bot_class = StaticMarketBot
                     extra_params = {
@@ -510,7 +494,6 @@ class BotManager:
                         'reverse_on_stop': reverse_on_stop
                     }
                 
-                # Tạo bot
                 bot = bot_class(
                 symbol if bot_mode == 'static' else None,
                 lev, percent, tp, sl, roi_trigger, self.ws_manager,
@@ -530,7 +513,6 @@ class BotManager:
             return False
         
         if created_count > 0:
-            # Lưu cấu hình bot vào database
             bot_data = {
                 'bot_id': bot_id,
                 'bot_mode': bot_mode,
@@ -554,7 +536,6 @@ class BotManager:
             
             db_manager.save_bot_config(bot_data)
             
-            # Thông tin chi tiết
             mode_info = "🤖 BOT TĨNH" if bot_mode == 'static' else "🔄 BOT ĐỘNG"
             strategy_info = ""
             
@@ -666,7 +647,6 @@ class BotManager:
             bot.stop()
             del self.bots[bot_id]
             
-            # Cập nhật database
             db_manager.update_bot_status(bot_id, "stopped")
             
             self.log(f"🔴 Đã dừng bot {bot_id}")
@@ -712,7 +692,7 @@ class BotManager:
                 time.sleep(1)
 
     def _handle_telegram_message(self, chat_id, text):
-        """Xử lý tin nhắn Telegram - LUỒNG MỚI"""
+        """Xử lý tin nhắn Telegram"""
         user_state = self.user_states.get(chat_id, {})
         current_step = user_state.get('step')
         
@@ -1261,7 +1241,6 @@ class BotManager:
         
         elif text == "📈 Vị thế":
             try:
-                # Lấy vị thế từ database
                 open_positions = db_manager.get_open_positions()
                 
                 if not open_positions:
@@ -1349,7 +1328,6 @@ class BotManager:
             balance = get_balance(self.api_key, self.api_secret)
             api_status = "✅ Đã kết nối" if balance is not None else "❌ Lỗi kết nối"
             
-            # Lấy thông tin từ database
             all_bots = db_manager.get_all_bots()
             open_positions = db_manager.get_open_positions()
             
@@ -1490,7 +1468,6 @@ def create_bot_manager(api_key=None, api_secret=None, telegram_bot_token=None, t
 def run_bot_manager():
     """Chạy ứng dụng BotManager với cấu hình từ biến môi trường"""
     
-    # Đọc cấu hình từ biến môi trường
     api_key = os.getenv('BINANCE_API_KEY')
     api_secret = os.getenv('BINANCE_API_SECRET')
     telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -1510,7 +1487,6 @@ def run_bot_manager():
     logger.info(f"📊 API Key: {api_key[:10]}...")
     logger.info(f"🤖 Telegram Chat ID: {telegram_chat_id}")
     
-    # Tạo BotManager
     bot_manager = create_bot_manager(
         api_key=api_key,
         api_secret=api_secret,
@@ -1526,9 +1502,8 @@ if __name__ == "__main__":
     
     if bot_manager:
         try:
-            # Giữ chương trình chạy
             while True:
-                time.sleep(3600)  # Chạy mỗi giờ
+                time.sleep(3600)
         except KeyboardInterrupt:
             logger.info("🛑 Đang dừng hệ thống...")
             bot_manager.stop_all()
