@@ -1,16 +1,23 @@
-# ===== CORE =====
+# ===== Core =====
+python-dotenv>=1.0.0
 requests>=2.31.0
 numpy>=1.26.0
 
-# ===== WEBSOCKET =====
-websocket-client>=1.7.0
+# ===== Binance / Websocket =====
+websocket-client>=1.6.4
 
-# ===== DATABASE (PostgreSQL) =====
+# ===== Database (PostgreSQL) =====
 psycopg2-binary>=2.9.9
 
-# ===== WEB API (React dùng) =====
-fastapi>=0.110.0
-uvicorn>=0.27.1
+# ===== Web API / React backend =====
+Flask>=3.0.0
+Flask-Cors>=4.0.0
+Flask-SocketIO>=5.3.6
+python-socketio>=5.11.0
+python-engineio>=4.9.0
 
-# ===== UTILS =====
-python-dotenv>=1.0.1
+# ===== Async / Concurrency =====
+eventlet>=0.35.2
+
+# ===== Production server =====
+gunicorn>=21.2.0
