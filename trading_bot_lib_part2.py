@@ -93,7 +93,8 @@ class BaseBot:
         self.bot_coordinator = bot_coordinator or BotExecutionCoordinator()
 
         self._save_bot_config_to_db()
-        self._restore_positions_from_db()
+        self._restore_positions_from_exchange_and_db()
+
 
         if symbol and not self.coin_finder.has_existing_position(symbol):
             self._add_symbol(symbol)
@@ -181,6 +182,120 @@ class BaseBot:
         except Exception as e:
             self.log(f"❌ Lỗi khôi phục vị thế từ database: {str(e)}")
     
+    def _restore_positions_from_exchange_and_db(self):
+        """
+        Khôi phục vị thế khi restart theo nguyên tắc:
+        - Binance là sự thật (source of truth)
+        - Nếu Binance còn vị thế => coi như bot đã mở trước đó => chỉ quản lý chốt/nhồi
+        - Nếu Binance không còn => DB/ram phải về CLOSED để không bị hiểu sai
+        """
+        try:
+            # 1) Lấy vị thế thật từ Binance (hàm get_positions nằm trong part1)
+            # get_positions trả danh sách positionRisk: positionAmt, entryPrice, markPrice, symbol...
+            all_pos = get_positions(symbol=None, api_key=self.api_key, api_secret=self.api_secret) or []
+    
+            # Map các vị thế đang mở theo symbol
+            open_on_binance = {}
+            for p in all_pos:
+                try:
+                    sym = (p.get("symbol") or "").upper()
+                    amt = float(p.get("positionAmt", 0) or 0)
+                    if sym and abs(amt) > 0:
+                        entry = float(p.get("entryPrice", 0) or 0)
+                        mark = float(p.get("markPrice", 0) or 0)
+                        lev = float(p.get("leverage", self.lev) or self.lev)
+    
+                        # Quy ước side theo bot code của bạn: BUY/LONG vs SELL/SHORT
+                        side = "BUY" if amt > 0 else "SELL"
+                        qty_abs = abs(amt)
+    
+                        open_on_binance[sym] = {
+                            "symbol": sym,
+                            "side": side,
+                            "quantity": qty_abs,     # lưu quantity dương
+                            "entry_price": entry,
+                            "current_price": mark if mark > 0 else get_current_price(sym),
+                            "leverage": lev,
+                        }
+                except Exception:
+                    continue
+    
+            # 2) Nếu bot là STATIC (self.symbol có giá trị) thì chỉ restore đúng symbol đó
+            # Nếu bot là DYNAMIC (self.symbol None) thì restore các symbol đang có vị thế
+            target_symbols = []
+            if self.symbol:
+                target_symbols = [self.symbol.upper()]
+            else:
+                target_symbols = list(open_on_binance.keys())
+    
+            # 3) Apply vào RAM + DB theo Binance
+            for sym in target_symbols:
+                if sym not in open_on_binance:
+                    continue
+    
+                pos = open_on_binance[sym]
+    
+                # đảm bảo symbol nằm trong active_symbols
+                if sym not in self.active_symbols:
+                    self._add_symbol(sym)
+    
+                # cập nhật state RAM (symbol_data) theo format bạn đang dùng
+                # qty có dấu theo side BUY(+)/SELL(-) như code cũ của bạn
+                signed_qty = pos["quantity"] * (1 if pos["side"] == "BUY" else -1)
+    
+                self.symbol_data[sym] = {
+                    "status": "open",
+                    "side": pos["side"],
+                    "qty": signed_qty,
+                    "entry": pos["entry_price"],
+                    "current_price": pos["current_price"],
+                    "position_open": True,
+                    "last_trade_time": time.time(),
+                    "last_close_time": 0,
+                    "pyramiding_count": self.symbol_data.get(sym, {}).get("pyramiding_count", 0),
+                }
+    
+                # lưu DB (để bot manager / web hiển thị đúng)
+                db_manager.save_position({
+                    "bot_id": self.bot_id,
+                    "symbol": sym,
+                    "side": pos["side"],
+                    "entry_price": pos["entry_price"],
+                    "quantity": pos["quantity"],
+                    "current_price": pos["current_price"],
+                    "roi": 0,                 # bạn có thể tính ROI nếu muốn
+                    "tp_price": None,
+                    "sl_price": None,
+                    "pyramiding_count": self.symbol_data[sym].get("pyramiding_count", 0),
+                    "status": "open",
+                })
+    
+            # 4) Reconcile ngược: DB đang open nhưng Binance không còn => đóng DB + reset RAM
+            db_open = db_manager.get_open_positions(self.bot_id) or []
+            for pos in db_open:
+                sym = (pos.get("symbol") or "").upper()
+                if not sym:
+                    continue
+    
+                if sym not in open_on_binance:
+                    # Binance không còn vị thế => DB phải đóng
+                    db_manager.close_position(self.bot_id, sym, reason="sync_restart_binance_no_position")
+    
+                    # reset RAM nếu đang giữ
+                    if sym in self.symbol_data:
+                        try:
+                            self.symbol_data[sym]["status"] = "closed"
+                            self.symbol_data[sym]["position_open"] = False
+                            self.symbol_data[sym]["qty"] = 0
+                            self.symbol_data[sym]["last_close_time"] = time.time()
+                        except Exception:
+                            pass
+    
+            logger.info(f"✅ Sync positions on startup: binance_open={len(open_on_binance)} | active={len(self.active_symbols)}")
+    
+        except Exception as e:
+            logger.error(f"❌ Lỗi _restore_positions_from_exchange_and_db: {e}")
+
     def _save_position_to_db(self, symbol, action="open"):
         """Lưu vị thế vào database"""
         if symbol not in self.symbol_data:
@@ -1350,3 +1465,4 @@ class StaticMarketBot(BaseBot):
                          "Bot-Tĩnh", bot_id=bot_id, 
                          static_entry_mode=static_entry_mode,
                          **kwargs)
+
