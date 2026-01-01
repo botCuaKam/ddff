@@ -640,18 +640,39 @@ class BotManager:
         self.log(f"✅ Đã dừng tổng cộng {total_stopped} coin, hệ thống vẫn chạy")
         return total_stopped
 
-    def stop_bot(self, bot_id):
-        """Dừng một bot cụ thể và cập nhật database"""
+    def stop_bot(self, bot_id, delete_config: bool = False, hard_delete: bool = False):
+        """
+        Dừng một bot.
+        - delete_config=False: chỉ dừng + status='stopped' (giữ config)
+        - delete_config=True : dừng + xóa config (soft/hard)
+        """
         bot = self.bots.get(bot_id)
+    
+        # 1) Nếu bot đang chạy trong RAM -> stop thread
         if bot:
-            bot.stop()
-            del self.bots[bot_id]
-            
+            try:
+                bot.stop()
+            except Exception as e:
+                self.log(f"⚠️ Lỗi stop bot runtime {bot_id}: {e}")
+    
+            try:
+                del self.bots[bot_id]
+            except Exception:
+                pass
+    
+        # 2) Update DB
+        if delete_config:
+            ok = db_manager.delete_bot_config(bot_id, hard=hard_delete)
+            if ok:
+                self.log(f"🗑️ Đã xóa {'CỨNG' if hard_delete else 'MỀM'} bot_config {bot_id}")
+            else:
+                self.log(f"❌ Không thể xóa bot_config {bot_id}")
+            return ok
+        else:
             db_manager.update_bot_status(bot_id, "stopped")
-            
             self.log(f"🔴 Đã dừng bot {bot_id}")
             return True
-        return False
+
 
     def stop_all(self):
         """Dừng tất cả bot và cập nhật database"""
@@ -1508,4 +1529,5 @@ if __name__ == "__main__":
             logger.info("🛑 Đang dừng hệ thống...")
             bot_manager.stop_all()
             logger.info("🔴 Hệ thống đã dừng")
+
 
