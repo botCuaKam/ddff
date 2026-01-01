@@ -386,6 +386,28 @@ def stop_system():
         logger.error(f"❌ Lỗi dừng hệ thống: {str(e)}")
         return jsonify({"success": False, "message": f"Lỗi: {str(e)}"}), 500
 
+@app.route("/api/bots/<bot_id>/delete", methods=["POST"])
+def delete_bot(bot_id):
+    try:
+        hard = request.args.get("hard", "0") == "1"
+
+        # Nếu bot_manager đang chạy -> stop và xóa config
+        if bot_manager:
+            ok = bot_manager.stop_bot(bot_id, delete_config=True, hard_delete=hard)
+        else:
+            # Nếu hệ thống chưa khởi tạo bot_manager -> vẫn xóa config trực tiếp DB
+            ok = db_manager.delete_bot_config(bot_id, hard=hard)
+
+        if ok:
+            socketio.emit("bot_deleted", {"bot_id": bot_id, "timestamp": datetime.now().isoformat()})
+            return jsonify({"success": True, "message": f"🗑️ Deleted bot {bot_id} ({'hard' if hard else 'soft'})"})
+        return jsonify({"success": False, "message": "❌ Delete failed"}), 500
+
+    except Exception as e:
+        logger.error(f"❌ Lỗi delete bot: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
 
 @app.route("/api/system/summary", methods=["GET"])
 def get_system_summary():
