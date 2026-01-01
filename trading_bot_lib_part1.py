@@ -44,6 +44,52 @@ class DatabaseManager:
         """Khởi tạo connection pool"""
         if DatabaseManager._connection_pool is None:
             self._init_connection_pool()
+
+    def soft_delete_bot_config(self, bot_id: str) -> bool:
+        """
+        XÓA MỀM bot config: set deleted_at = NOW()
+        -> Bot sẽ không còn xuất hiện trong các query `WHERE deleted_at IS NULL`
+        """
+        try:
+            query = """
+            UPDATE bot_configs
+            SET deleted_at = CURRENT_TIMESTAMP,
+                status = 'deleted',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE bot_id = %s AND deleted_at IS NULL
+            """
+            self.execute_query(query, (bot_id,))
+            return True
+        except Exception as e:
+            logger.error(f"❌ Lỗi soft delete bot_config {bot_id}: {str(e)}")
+            return False
+    
+    
+    def hard_delete_bot_config(self, bot_id: str) -> bool:
+        """
+        XÓA CỨNG: xóa luôn bot_configs + dữ liệu liên quan.
+        Cẩn thận: sẽ mất lịch sử nếu bạn xóa trade_history/bot_statistics.
+        """
+        try:
+            # Nếu DB bạn có FK thì nên xóa bảng con trước
+            self.execute_query("DELETE FROM bot_positions WHERE bot_id = %s", (bot_id,))
+            self.execute_query("DELETE FROM trade_history WHERE bot_id = %s", (bot_id,))
+            self.execute_query("DELETE FROM bot_statistics WHERE bot_id = %s", (bot_id,))
+            self.execute_query("DELETE FROM bot_configs WHERE bot_id = %s", (bot_id,))
+            return True
+        except Exception as e:
+            logger.error(f"❌ Lỗi hard delete bot_config {bot_id}: {str(e)}")
+            return False
+    
+    
+    def delete_bot_config(self, bot_id: str, hard: bool = False) -> bool:
+        """
+        Wrapper tiện dùng:
+        - hard=False: soft delete (khuyến nghị)
+        - hard=True : hard delete
+        """
+        return self.hard_delete_bot_config(bot_id) if hard else self.soft_delete_bot_config(bot_id)
+
     
     def _init_connection_pool(self):
         """Khởi tạo connection pool từ biến môi trường"""
@@ -341,6 +387,8 @@ class DatabaseManager:
             roi, tp_price, sl_price, pyramiding_count, status
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (bot_id, symbol) DO UPDATE SET
+            entry_price = EXCLUDED.entry_price,
+            quantity = EXCLUDED.quantity,
             current_price = EXCLUDED.current_price,
             roi = EXCLUDED.roi,
             pyramiding_count = EXCLUDED.pyramiding_count,
@@ -1517,3 +1565,4 @@ def auto_cleanup_database():
 # Khởi chạy thread cleanup
 cleanup_thread = threading.Thread(target=auto_cleanup_database, daemon=True)
 cleanup_thread.start()
+
