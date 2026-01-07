@@ -652,7 +652,7 @@ class BotManager:
         # 1) Stop runtime nếu bot đang chạy trong RAM
         if bot:
             try:
-                bot.stop()  # BaseBot.stop() đã stop symbols + update status stopped :contentReference[oaicite:4]{index=4}
+                bot.stop()
             except Exception as e:
                 self.log(f"⚠️ Lỗi stop runtime bot {bot_id}: {e}")
     
@@ -1536,6 +1536,7 @@ if __name__ == "__main__":
             logger.info("🛑 Đang dừng hệ thống...")
             bot_manager.stop_all()
             logger.info("🔴 Hệ thống đã dừng")
+
 
 
 
