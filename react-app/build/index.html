@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DDFF Bot Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <!-- Candlestick chart (TradingView Lightweight Charts) -->
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+
+<body>
+  <div class="app">
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand__logo">⚡</div>
+        <div class="brand__text">
+          <div class="brand__name">DDFF Dashboard</div>
+          <div class="brand__sub">Web + Telegram song song</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav__item is-active" data-tab="bots">
+          <span>🤖</span><span>Bots</span>
+        </button>
+        <button class="nav__item" data-tab="chart">
+          <span>📈</span><span>Chart</span>
+        </button>
+        <button class="nav__item" data-tab="logs">
+          <span>🧾</span><span>Logs</span>
+        </button>
+      </nav>
+
+      <div class="sidebar__footer">
+        <div class="pill" id="pill-status">● Disconnected</div>
+        <div class="muted">Auto refresh: 2s–3s</div>
+      </div>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="main">
+      <!-- TOPBAR -->
+      <header class="topbar">
+        <div class="topbar__left">
+          <h1 class="h1">Trading Bot Control Center</h1>
+          <div class="muted">Quản lý bot, biểu đồ và log realtime</div>
+        </div>
+
+        <div class="topbar__right">
+          <button class="btn btn--ghost" id="btn-refresh">↻ Refresh</button>
+          <button class="btn btn--danger" id="btn-stop-all">⏹ Stop All</button>
+        </div>
+      </header>
+
+      <!-- SUMMARY CARDS -->
+      <section class="grid grid--3" id="summary-grid">
+        <div class="card">
+          <div class="card__title">Bots running</div>
+          <div class="card__value" id="sum-bots">—</div>
+          <div class="card__meta muted" id="sum-ws">WS: —</div>
+        </div>
+        <div class="card">
+          <div class="card__title">Balance</div>
+          <div class="card__value" id="sum-balance">—</div>
+          <div class="card__meta muted">Theo API /api/state</div>
+        </div>
+        <div class="card">
+          <div class="card__title">Queue</div>
+          <div class="card__value" id="sum-queue">—</div>
+          <div class="card__meta muted" id="sum-queue-meta">—</div>
+        </div>
+      </section>
+
+      <!-- TABS -->
+      <section class="tabs">
+
+        <!-- TAB: BOTS -->
+        <div class="tab is-active" id="tab-bots">
+          <div class="grid grid--2">
+            <!-- Create Bot -->
+            <div class="panel">
+              <div class="panel__head">
+                <div>
+                  <div class="panel__title">Tạo Bot (Queue)</div>
+                  <div class="muted">Gửi POST /api/add-bot</div>
+                </div>
+              </div>
+
+              <div class="form">
+                <div class="form__row">
+                  <label>Leverage</label>
+                  <input id="f-lev" type="number" value="50" min="1" max="125"/>
+                </div>
+                <div class="form__row">
+                  <label>% vốn</label>
+                  <input id="f-percent" type="number" value="5" min="0.1" step="0.1"/>
+                </div>
+                <div class="form__row">
+                  <label>TP %</label>
+                  <input id="f-tp" type="number" value="20" min="0.1" step="0.1"/>
+                </div>
+                <div class="form__row">
+                  <label>SL %</label>
+                  <input id="f-sl" type="number" value="200" min="1" step="1"/>
+                </div>
+                <div class="form__row">
+                  <label>ROI Trigger %</label>
+                  <input id="f-roi" type="number" value="30" min="0.1" step="0.1"/>
+                </div>
+
+                <div class="form__actions">
+                  <button class="btn btn--primary" id="btn-add-bot">➕ Create Bot</button>
+                  <div class="muted" id="create-msg"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Bot list -->
+            <div class="panel">
+              <div class="panel__head">
+                <div>
+                  <div class="panel__title">Danh sách Bots</div>
+                  <div class="muted">GET /api/state</div>
+                </div>
+              </div>
+
+              <div class="table-wrap">
+                <table class="table">
+                  <thead>
+                    <tr>
+                      <th>Bot ID</th>
+                      <th>Status</th>
+                      <th>Lev</th>
+                      <th>%</th>
+                      <th>TP/SL</th>
+                      <th>Symbols</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="bots-tbody">
+                    <tr><td colspan="7" class="muted">Đang tải…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB: CHART -->
+        <div class="tab" id="tab-chart">
+          <div class="panel">
+            <div class="panel__head panel__head--row">
+              <div>
+                <div class="panel__title">Candlestick Chart</div>
+                <div class="muted">GET /api/chart?symbol=...&interval=...&limit=...</div>
+              </div>
+
+              <div class="controls">
+                <input id="c-symbol" placeholder="BTCUSDT" value="BTCUSDT"/>
+                <select id="c-interval">
+                  <option value="1m" selected>1m</option>
+                  <option value="5m">5m</option>
+                  <option value="15m">15m</option>
+                  <option value="1h">1h</option>
+                </select>
+                <select id="c-limit">
+                  <option value="20">20</option>
+                  <option value="40">40</option>
+                  <option value="60" selected>60</option>
+                  <option value="120">120</option>
+                </select>
+                <button class="btn btn--primary" id="btn-load-chart">Load</button>
+              </div>
+            </div>
+
+            <div class="chart-wrap">
+              <div id="chart" class="chart"></div>
+              <div class="chart-meta muted" id="chart-meta">—</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB: LOGS -->
+        <div class="tab" id="tab-logs">
+          <div class="panel">
+            <div class="panel__head panel__head--row">
+              <div>
+                <div class="panel__title">Logs (events)</div>
+                <div class="muted">GET /api/events?limit=...</div>
+              </div>
+
+              <div class="controls">
+                <select id="l-limit">
+                  <option value="50">50</option>
+                  <option value="80" selected>80</option>
+                  <option value="150">150</option>
+                  <option value="300">300</option>
+                </select>
+                <button class="btn btn--ghost" id="btn-clear">Clear</button>
+              </div>
+            </div>
+
+            <pre class="logs" id="logs"></pre>
+          </div>
+        </div>
+
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
