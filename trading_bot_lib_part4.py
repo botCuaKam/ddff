@@ -334,6 +334,190 @@ def broadcast_updates():
 
 
 # ================== REACT SERVE ==================
+@app.route("/api/events", methods=["GET"])
+def api_events():
+    """
+    Frontend compat: lấy danh sách events (logs) từ buffer _EVENTS
+    GET /api/events?limit=80
+    """
+    try:
+        limit = int(request.args.get("limit", "80"))
+        limit = max(1, min(500, limit))
+        with _EVENTS_LOCK:
+            data = list(_EVENTS)[-limit:]
+        return jsonify(data)
+    except Exception as e:
+        logger.error(f"❌ /api/events error: {e}")
+        return jsonify([]), 200
+
+@app.route("/api/state", methods=["GET"])
+def api_state():
+    """
+    Frontend compat: UI đẹp gọi endpoint này để render Summary + Bot list
+    """
+    try:
+        bots_dict = {}
+        ws_symbols = []
+        queue = {}
+        balance = None
+
+        if bot_manager:
+            # 1) bots info
+            for bot_id, bot in bot_manager.bots.items():
+                bots_dict[bot_id] = {
+                    "bot_id": bot_id,
+                    "status": getattr(bot, "status", "unknown"),
+                    "strategy": getattr(bot, "strategy_name", bot.__class__.__name__),
+                    "leverage": getattr(bot, "lev", None),
+                    "percent": getattr(bot, "percent", None),
+                    "tp": getattr(bot, "tp", None),
+                    "sl": getattr(bot, "sl", None),
+                    "roi_trigger": getattr(bot, "roi_trigger", None),
+                    "active_symbols": list(getattr(bot, "active_symbols", []) or []),
+                }
+
+            # 2) websocket subscribed symbols
+            try:
+                ws_symbols = list(getattr(bot_manager.ws_manager, "subscribed_symbols", []) or [])
+            except Exception:
+                ws_symbols = []
+
+            # 3) queue info (nếu có)
+            try:
+                queue = bot_manager.bot_coordinator.get_queue_info()
+            except Exception:
+                queue = {}
+
+            # 4) balance (nếu có hàm get_balance)
+            try:
+                from trading_bot_lib_part1 import get_balance
+                balance = get_balance(bot_manager.api_key, bot_manager.api_secret)
+            except Exception:
+                balance = None
+
+        return jsonify({
+            "bot_count": len(bots_dict),
+            "balance": balance,
+            "ws_symbols": ws_symbols,
+            "queue": queue,
+            "bots": bots_dict,
+        })
+    except Exception as e:
+        logger.error(f"❌ /api/state error: {e}")
+        push_event("error", f"/api/state error: {e}")
+        return jsonify({"error": str(e), "bot_count": 0, "bots": {}}), 500
+@app.route("/api/add-bot", methods=["POST"])
+def api_add_bot_compat():
+    """
+    Frontend compat: tạo bot theo form UI đẹp
+    POST /api/add-bot
+    body: {lev, percent, tp, sl, roi_trigger}
+    """
+    if not bot_manager:
+        return jsonify({"ok": False, "msg": "BotManager chưa chạy"}), 400
+
+    try:
+        body = request.get_json(silent=True) or {}
+
+        lev = int(body.get("lev", 50))
+        percent = float(body.get("percent", 5))
+        tp = float(body.get("tp", 20))
+        sl = float(body.get("sl", 200))
+        roi_trigger = float(body.get("roi_trigger", 30))
+
+        ok = bot_manager.add_bot(
+            bot_mode="dynamic",
+            bot_type="queue",
+            lev=lev,
+            percent=percent,
+            tp=tp,
+            sl=sl,
+            roi_trigger=roi_trigger,
+            symbol=None,
+            bot_count=1,
+            dynamic_strategy="volume",
+        )
+
+        push_event("info", f"Add bot: lev={lev} percent={percent} tp={tp} sl={sl} roi={roi_trigger}")
+        return jsonify({"ok": bool(ok), "msg": "created" if ok else "failed"})
+    except Exception as e:
+        logger.error(f"❌ /api/add-bot error: {e}")
+        push_event("error", f"/api/add-bot error: {e}")
+        return jsonify({"ok": False, "msg": str(e)}), 500
+@app.route("/api/stop-bot/<bot_id>", methods=["POST"])
+def api_stop_bot_compat(bot_id: str):
+    """
+    Frontend compat: stop 1 bot theo bot_id
+    POST /api/stop-bot/<bot_id>
+    """
+    if not bot_manager:
+        return jsonify({"ok": False, "msg": "BotManager chưa chạy"}), 400
+
+    try:
+        ok = bot_manager.stop_bot(bot_id, delete_config=True, hard_delete=False)
+        push_event("info", f"Stop bot: {bot_id}")
+        return jsonify({"ok": bool(ok), "msg": "stopped" if ok else "failed"})
+    except Exception as e:
+        logger.error(f"❌ /api/stop-bot/{bot_id} error: {e}")
+        push_event("error", f"/api/stop-bot/{bot_id} error: {e}")
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+@app.route("/api/stop-all", methods=["POST"])
+def api_stop_all_compat():
+    """
+    Frontend compat: stop all bots
+    POST /api/stop-all
+    """
+    if not bot_manager:
+        return jsonify({"ok": False, "msg": "BotManager chưa chạy"}), 400
+
+    try:
+        bot_manager.stop_all(delete_config=True, hard_delete=False)
+        push_event("info", "Stop all bots")
+        return jsonify({"ok": True, "msg": "stopped_all"})
+    except Exception as e:
+        logger.error(f"❌ /api/stop-all error: {e}")
+        push_event("error", f"/api/stop-all error: {e}")
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+@app.route("/api/chart", methods=["GET"])
+def api_chart_compat():
+    """
+    Frontend compat: trả về OHLC candles cho chart candlestick
+    GET /api/chart?symbol=BTCUSDT&interval=1m&limit=60
+    """
+    try:
+        import requests
+
+        symbol = (request.args.get("symbol") or "BTCUSDT").upper().strip()
+        interval = (request.args.get("interval") or "1m").strip()
+        limit = int(request.args.get("limit") or "60")
+        limit = max(1, min(1000, limit))
+
+        url = "https://fapi.binance.com/fapi/v1/klines"
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        raw = r.json()
+
+        candles = []
+        for k in raw:
+            # kline format: [openTime, open, high, low, close, volume, ...]
+            candles.append({
+                "t": int(k[0]),
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
+                "volume": float(k[5]),
+            })
+
+        return jsonify({"symbol": symbol, "interval": interval, "candles": candles})
+    except Exception as e:
+        logger.error(f"❌ /api/chart error: {e}")
+        push_event("error", f"/api/chart error: {e}")
+        return jsonify({"error": str(e), "candles": []}), 500
+
 @app.route("/")
 def serve_react():
     """Phục vụ React build nếu có, không có thì trả thông báo"""
