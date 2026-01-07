@@ -41,6 +41,23 @@ if not _socket_async_mode:
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode=_socket_async_mode)
 
+_EVENTS = []
+_EVENTS_LOCK = threading.Lock()
+
+def push_event(event_type: str, message: str, extra: dict | None = None) -> None:
+    payload = {
+        "type": event_type,
+        "message": message,
+        "timestamp": time.time(),
+    }
+    if extra:
+        payload.update(extra)
+    with _EVENTS_LOCK:
+        _EVENTS.append(payload)
+        if len(_EVENTS) > 500:
+            del _EVENTS[:-500]
+
+
 # ================== GLOBALS ==================
 bot_manager: Optional[BotManager] = None
 
