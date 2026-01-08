@@ -11,6 +11,9 @@ import secrets
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Tuple
+# ===== Google Auth imports =====
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 import jwt
 from flask import request, jsonify, session
@@ -895,6 +898,80 @@ def register_admin_routes(app):
             logger.error(f"❌ Lỗi lấy system stats: {str(e)}")
             return jsonify({"error": str(e)}), 500
 
+def register_google_auth_route(app):
+    """
+    Đăng nhập bằng Google:
+    Frontend gửi: { "credential": "<google_id_token>" }
+    Backend verify token -> tìm user theo email -> nếu chưa có thì tạo -> trả JWT
+    """
+
+    @app.route("/api/auth/google", methods=["POST"])
+    def auth_google():
+        try:
+            body = request.get_json(silent=True) or {}
+            credential = body.get("credential")
+
+            if not credential:
+                return jsonify({"error": "Missing credential"}), 400
+
+            GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+            if not GOOGLE_CLIENT_ID:
+                return jsonify({"error": "GOOGLE_CLIENT_ID not set"}), 500
+
+            # Verify token Google
+            info = id_token.verify_oauth2_token(
+                credential,
+                google_requests.Request(),
+                GOOGLE_CLIENT_ID
+            )
+
+            email = (info.get("email") or "").lower().strip()
+            name = (info.get("name") or "").strip()
+            if not email:
+                return jsonify({"error": "Google token missing email"}), 400
+
+            # ===== 1) Tìm user theo email =====
+            # (Nếu code bạn đang đặt tên khác, đổi đúng tên hàm ở đây)
+            user = get_user_by_email(email)
+
+            # ===== 2) Nếu chưa có -> tạo user mới =====
+            if not user:
+                base_name = name or email.split("@")[0]
+                username = f"{base_name}_{secrets.token_hex(3)}"
+                password = secrets.token_hex(16)  # random, vì user login bằng Google
+
+                ok, user_id = create_user(username, email, password)
+                if not ok:
+                    return jsonify({"error": "Cannot create user"}), 500
+
+                user = {
+                    "id": user_id,
+                    "username": username,
+                    "email": email,
+                    "is_admin": False
+                }
+
+            # ===== 3) Tạo JWT giống login thường =====
+            token = generate_jwt_token(
+                user["id"],
+                user.get("username") or email,
+                bool(user.get("is_admin", False))
+            )
+
+            return jsonify({
+                "token": token,
+                "user": {
+                    "id": user["id"],
+                    "username": user.get("username"),
+                    "email": email
+                }
+            })
+
+        except Exception as e:
+            logger.exception("Google auth error")
+            return jsonify({"error": str(e)}), 500
+
+
 # ================== INITIALIZE ==================
 def initialize_auth_system(app, bot_manager=None):
     """Khởi tạo hệ thống auth"""
@@ -905,6 +982,7 @@ def initialize_auth_system(app, bot_manager=None):
     
     # Đăng ký routes
     register_auth_routes(app)
+    register_google_auth_route(app)
     
     if bot_manager:
         register_user_bot_routes(app, bot_manager)
