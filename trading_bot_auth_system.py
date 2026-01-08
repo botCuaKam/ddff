@@ -2,8 +2,6 @@
 # PHẦN 5: HỆ THỐNG ĐĂNG NHẬP ĐA NGƯỜI DÙNG VỚI JWT
 
 from trading_bot_lib_part1 import db_manager, logger
-from trading_bot_lib_part4 import get_database_connection, send_telegram
-
 import os
 import time
 import hashlib
@@ -18,7 +16,8 @@ from google.auth.transport import requests as google_requests
 import jwt
 from flask import request, jsonify, session
 from functools import wraps
-
+import psycopg2
+from psycopg2.extras import RealDictCursor
 # ================== CẤU HÌNH ==================
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
@@ -112,6 +111,23 @@ def init_auth_tables():
         if conn:
             conn.close()
 
+def get_database_connection():
+    """
+    Tách DB connector ra khỏi part4 để tránh circular import.
+    Ưu tiên DATABASE_URL nếu có.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        dbname=os.getenv("DB_NAME", "postgres"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", ""),
+        cursor_factory=RealDictCursor,
+    )
 def create_default_admin():
     """Tạo tài khoản admin mặc định"""
     default_password = os.getenv("ADMIN_DEFAULT_PASSWORD", "admin123")
