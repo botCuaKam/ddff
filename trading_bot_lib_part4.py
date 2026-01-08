@@ -20,7 +20,11 @@ from psycopg2.extras import RealDictCursor
 
 # ================== FLASK APP ==================
 # Nếu bạn có build React rồi, set đúng path build ở đây.
-REACT_BUILD_DIR = os.getenv("REACT_BUILD_DIR", "../react-app/build")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DEFAULT_REACT_BUILD_DIR = os.path.join(BASE_DIR, "react-app", "build")
+REACT_BUILD_DIR = os.getenv("REACT_BUILD_DIR", DEFAULT_REACT_BUILD_DIR)
+
 REACT_STATIC_DIR = os.path.join(REACT_BUILD_DIR, "static")
 
 app = Flask(
@@ -957,7 +961,7 @@ def handle_subscribe(data):
 
 
 # ================== RUN SERVER / THREAD ==================
-def run_api_server(host: str = "0.0.0.0", port: int = 5000, debug: bool = False):
+def run_api_server(host: str = "0.0.0.0", port: int = 8080, debug: bool = False):
     """
     Chạy API server.
     Lưu ý: deploy Railway nên chạy bằng gunicorn (Procfile).
