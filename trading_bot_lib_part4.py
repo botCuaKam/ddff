@@ -3,6 +3,8 @@
 
 from trading_bot_lib_part3 import BotManager
 from trading_bot_lib_part1 import db_manager, logger
+from trading_bot_auth_system import initialize_auth_system
+
 
 import os
 import time
@@ -33,6 +35,7 @@ app = Flask(
     template_folder=REACT_BUILD_DIR
 )
 CORS(app)
+initialize_auth_system(app, bot_manager=None)
 
 # SocketIO: ưu tiên eventlet nếu có, fallback threading
 _socket_async_mode = os.getenv("SOCKETIO_ASYNC_MODE", "").strip().lower()
@@ -487,7 +490,11 @@ def api_stop_all_compat():
 @app.route("/api/chart", methods=["GET"])
 def api_chart_compat():
     """
-    Frontend compat: trả về OHLC candles cho chart candlestick
+    Chart endpoint (robust):
+    - thử Futures USDT-M: https://fapi.binance.com/fapi/v1/klines
+    - fail thì fallback Spot: https://api.binance.com/api/v3/klines
+    - fail nữa thì thử COIN-M: https://dapi.binance.com/dapi/v1/klines
+
     GET /api/chart?symbol=BTCUSDT&interval=1m&limit=60
     """
     try:
@@ -498,29 +505,50 @@ def api_chart_compat():
         limit = int(request.args.get("limit") or "60")
         limit = max(1, min(1000, limit))
 
-        url = "https://fapi.binance.com/fapi/v1/klines"
-        params = {"symbol": symbol, "interval": interval, "limit": limit}
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        raw = r.json()
+        endpoints = [
+            ("FUTURES_USDTM", "https://fapi.binance.com/fapi/v1/klines"),
+            ("SPOT",          "https://api.binance.com/api/v3/klines"),
+            ("FUTURES_COINM", "https://dapi.binance.com/dapi/v1/klines"),
+        ]
 
-        candles = []
-        for k in raw:
-            # kline format: [openTime, open, high, low, close, volume, ...]
-            candles.append({
-                "t": int(k[0]),
-                "open": float(k[1]),
-                "high": float(k[2]),
-                "low": float(k[3]),
-                "close": float(k[4]),
-                "volume": float(k[5]),
-            })
+        last_err = None
+        for market, url in endpoints:
+            try:
+                params = {"symbol": symbol, "interval": interval, "limit": limit}
+                r = requests.get(url, params=params, timeout=10)
+                if r.status_code != 200:
+                    last_err = f"{market} HTTP {r.status_code}: {r.text[:200]}"
+                    continue
 
-        return jsonify({"symbol": symbol, "interval": interval, "candles": candles})
+                raw = r.json()
+                candles = []
+                for k in raw:
+                    candles.append({
+                        "t": int(k[0]),
+                        "open": float(k[1]),
+                        "high": float(k[2]),
+                        "low": float(k[3]),
+                        "close": float(k[4]),
+                        "volume": float(k[5]),
+                    })
+
+                return jsonify({
+                    "symbol": symbol,
+                    "interval": interval,
+                    "market": market,
+                    "candles": candles
+                })
+            except Exception as e:
+                last_err = f"{market} error: {e}"
+
+        push_event("error", f"/api/chart failed: {last_err}")
+        return jsonify({"error": last_err or "chart failed", "candles": []}), 400
+
     except Exception as e:
         logger.error(f"❌ /api/chart error: {e}")
         push_event("error", f"/api/chart error: {e}")
         return jsonify({"error": str(e), "candles": []}), 500
+
 
 @app.route("/")
 def serve_react():
