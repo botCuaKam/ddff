@@ -642,26 +642,25 @@ class BotManager:
 
     def stop_bot(self, bot_id, delete_config: bool = False, hard_delete: bool = False):
         """
-        Dừng một bot.
-    
-        - delete_config=False: chỉ stop bot + update status='stopped'
-        - delete_config=True : stop bot + XÓA config (soft/hard) để DB chạy lại không dựng bot nữa
+        Dừng 1 bot.
+        - delete_config=False: chỉ dừng + status=stopped
+        - delete_config=True : dừng + xóa bot_config (soft/hard)
         """
         bot = self.bots.get(bot_id)
     
-        # 1) Stop runtime nếu bot đang chạy trong RAM
+        # Stop runtime
         if bot:
             try:
                 bot.stop()
             except Exception as e:
-                self.log(f"⚠️ Lỗi stop runtime bot {bot_id}: {e}")
+                self.log(f"⚠️ Lỗi stop bot runtime {bot_id}: {e}")
     
             try:
                 del self.bots[bot_id]
             except Exception:
                 pass
     
-        # 2) Update DB
+        # Update DB
         if delete_config:
             ok = db_manager.delete_bot_config(bot_id, hard=hard_delete)
             if ok:
@@ -669,22 +668,21 @@ class BotManager:
             else:
                 self.log(f"❌ Không thể xóa bot_config {bot_id}")
             return ok
-        else:
-            db_manager.update_bot_status(bot_id, "stopped")
-            self.log(f"🔴 Đã dừng bot {bot_id}")
-            return True
+    
+        db_manager.update_bot_status(bot_id, "stopped")
+        self.log(f"🔴 Đã dừng bot {bot_id}")
+        return True
 
     def stop_all(self, delete_config: bool = False, hard_delete: bool = False):
         """
         Dừng tất cả bot.
-    
-        - delete_config=False: chỉ dừng
-        - delete_config=True : dừng + xóa config tất cả bot
+        - delete_config=True: dừng + xóa config tất cả bot
         """
         self.log("🔴 Đang dừng tất cả bot.")
         for bot_id in list(self.bots.keys()):
             self.stop_bot(bot_id, delete_config=delete_config, hard_delete=hard_delete)
         self.log("🔴 Đã dừng tất cả bot, hệ thống vẫn chạy")
+
 
     
 
@@ -1536,6 +1534,7 @@ if __name__ == "__main__":
             logger.info("🛑 Đang dừng hệ thống...")
             bot_manager.stop_all()
             logger.info("🔴 Hệ thống đã dừng")
+
 
 
 
